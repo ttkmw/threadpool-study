@@ -20,7 +20,8 @@ class ThreadPool(numThreads: Int): Executor {
         threads = arrayOfNulls(numThreads)
         for (i in 0 ..< numThreads) {
             threads[i] = Thread {
-                while (!shuttingDown) {
+                // race condition 이슈
+                while (!shuttingDown || queue.isNotEmpty()) {
                     var task: Runnable? = null
                     try {
                         task = queue.take()

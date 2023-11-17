@@ -61,9 +61,10 @@ class ThreadPool(maxNumThreads: Int): Executor {
     }
 
     private fun newThread() {
+        numActiveThreads.incrementAndGet()
         val newThread = Thread {
             try {
-                var isActive = false
+                var isActive = true
                 while (true) {
                     try {
                         var task = queue.poll()

@@ -48,6 +48,7 @@ class ThreadPool(maxNumThreads: Int): Executor {
     private fun addThreadIfNecessary() {
         if (needsMoreThreads()) {
             threadLock.lock()
+            // try, finnally를 newThread에만 걸어도 되는건지, needsMoreThreads까지 포함해야하는건지 궁금.
             try {
                 if (needsMoreThreads()) {
                     newThread()
@@ -62,10 +63,25 @@ class ThreadPool(maxNumThreads: Int): Executor {
     private fun newThread() {
         val newThread = Thread {
             try {
+                var isActive = false
                 while (true) {
                     try {
-                        val task = queue.take()
-                        numActiveThreads.incrementAndGet()
+                        var task = queue.poll()
+                        if (task != null) {
+                            if (!isActive) {
+                                isActive = true
+                                numActiveThreads.incrementAndGet()
+                            }
+                        } else {
+                            if (isActive) {
+                                isActive = false
+                                numActiveThreads.decrementAndGet()
+                            }
+                            task = queue.take()
+                            isActive = true
+                            numActiveThreads.incrementAndGet()
+                        }
+
                         if (task == SHUTDOWN_TASK) {
                             break
                         } else {

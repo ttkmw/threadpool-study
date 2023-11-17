@@ -14,20 +14,29 @@ class ThreadPool(numThreads: Int): Executor {
     private var threads: Array<Thread?>
     private val queue = LinkedTransferQueue<Runnable>()
     private val started = AtomicBoolean()
+    private var shuttingDown = false
 
     init {
         threads = arrayOfNulls(numThreads)
         for (i in 0 ..< numThreads) {
             threads[i] = Thread {
-                while (true) {
+                while (!shuttingDown) {
+                    var task: Runnable? = null
                     try {
-                        val task = queue.take()
-                        task.run()
-                    } catch (e: InterruptedException) {
-                        println("threadPool will be shutdown")
-                        throw RuntimeException()
+                        task = queue.take()
+                    } catch (_: InterruptedException) {
+                    }
+
+                    try {
+                        task?.run()
+                    } catch (t: Throwable) {
+                        if (t !is InterruptedException) {
+                            println("unexpected exception thrown")
+                            t.printStackTrace()
+                        }
                     }
                 }
+                println("shutting down - ${Thread.currentThread().name}")
             }
         }
     }
@@ -41,9 +50,28 @@ class ThreadPool(numThreads: Int): Executor {
     }
 
     fun shutdown() {
+        shuttingDown = true
         for (thread in threads) {
             thread?.interrupt()
         }
-    }
 
+        for (thread in threads) {
+            if (thread == null) {
+                continue
+            }
+            while (true) {
+                try {
+                    thread.join()
+                } catch (_: InterruptedException) {
+
+                }
+
+                if (!thread.isAlive) {
+                    break
+                }
+
+                thread.interrupt()
+            }
+        }
+    }
 }

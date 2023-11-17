@@ -7,24 +7,18 @@ class ThreadPoolTest {
 
     @Test
     fun execute() {
-        val threadPool = ThreadPool(2)
+        val threadPool = ThreadPool(10)
 
-        val numTasks = 5
-
-        Thread {
-            val latch = CountDownLatch(numTasks)
+        val numTasks = 200
+        try {
             for (i in 0 ..< numTasks) {
                 threadPool.execute {
                     println("thread ${Thread.currentThread().name} is running task: $i")
-                    latch.countDown()
+                    Thread.sleep(50)
                 }
             }
-
-            latch.await()
-        }.start()
-
-        Thread {
+        } finally {
             threadPool.shutdown()
-        }.start()
+        }
     }
 }

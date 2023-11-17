@@ -5,9 +5,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /*
 * 문제점
-* 1. shutdown 기능이 없다
-* 2. 스레드 갯수를 정하는게 정적이다.
-* 3. 큐에 태스크가 남아있어도 스레드풀이 끝나버린다.
+* 스레드 갯수를 정하는게 정적이다.
 * */
 class ThreadPool(numThreads: Int): Executor {
 
@@ -53,6 +51,11 @@ class ThreadPool(numThreads: Int): Executor {
         }
 
         queue.add(command)
+
+        if (shuttingDown.get()) {
+            queue.remove(command)
+            throw RejectedExecutionException()
+        }
     }
 
     fun shutdown() {

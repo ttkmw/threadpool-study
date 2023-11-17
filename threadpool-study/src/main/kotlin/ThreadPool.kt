@@ -1,6 +1,6 @@
-import java.lang.RuntimeException
 import java.util.concurrent.Executor
 import java.util.concurrent.LinkedTransferQueue
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /*
@@ -11,31 +11,31 @@ import java.util.concurrent.atomic.AtomicBoolean
 * */
 class ThreadPool(numThreads: Int): Executor {
 
+    private val SHUTDOWN_TASK = Runnable {  }
     private var threads: Array<Thread?>
     private val queue = LinkedTransferQueue<Runnable>()
     private val started = AtomicBoolean()
-    private var shuttingDown = false
+    private val shuttingDown = AtomicBoolean()
 
     init {
         threads = arrayOfNulls(numThreads)
         for (i in 0 ..< numThreads) {
             threads[i] = Thread {
-                // race condition 이슈
-                while (!shuttingDown || queue.isNotEmpty()) {
-                    var task: Runnable? = null
+                while (true) {
                     try {
-                        task = queue.take()
-                    } catch (_: InterruptedException) {
-                    }
-
-                    try {
-                        task?.run()
+                        val task = queue.take()
+                        if (task == SHUTDOWN_TASK) {
+                            break
+                        } else {
+                            task.run()
+                        }
                     } catch (t: Throwable) {
                         if (t !is InterruptedException) {
                             println("unexpected exception thrown")
                             t.printStackTrace()
                         }
                     }
+
                 }
                 println("shutting down - ${Thread.currentThread().name}")
             }
@@ -47,32 +47,34 @@ class ThreadPool(numThreads: Int): Executor {
                 thread?.start()
             }
         }
+
+        if (shuttingDown.get()) {
+            throw RejectedExecutionException()
+        }
+
         queue.add(command)
     }
 
     fun shutdown() {
-        shuttingDown = true
-        for (thread in threads) {
-            thread?.interrupt()
+        if (shuttingDown.compareAndSet(false, true)) {
+            for (thread in threads) {
+                queue.add(SHUTDOWN_TASK)
+            }
         }
 
         for (thread in threads) {
             if (thread == null) {
                 continue
             }
-            while (true) {
+
+            do {
                 try {
                     thread.join()
                 } catch (_: InterruptedException) {
 
                 }
 
-                if (!thread.isAlive) {
-                    break
-                }
-
-                thread.interrupt()
-            }
+            } while (thread.isAlive)
         }
     }
 }

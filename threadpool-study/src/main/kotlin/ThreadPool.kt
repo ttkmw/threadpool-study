@@ -1,5 +1,3 @@
-import java.util.Collections
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
 import java.util.concurrent.LinkedTransferQueue
 import java.util.concurrent.RejectedExecutionException
@@ -16,7 +14,8 @@ class ThreadPool(maxNumThreads: Int): Executor {
     private val SHUTDOWN_TASK = Runnable {  }
     private var maxNumThreads: Int
     private val numActiveThreads = AtomicInteger()
-    private var threads = Collections.newSetFromMap(ConcurrentHashMap<Thread, Boolean>())
+    private val numThreads = AtomicInteger()
+    private var threads = HashSet<Thread>()
     private val queue = LinkedTransferQueue<Runnable>()
     private val started = AtomicBoolean()
     private val shuttingDown = AtomicBoolean()
@@ -28,7 +27,7 @@ class ThreadPool(maxNumThreads: Int): Executor {
     override fun execute(command: Runnable) {
         if (started.compareAndSet(false, true)) {
             for (thread in threads) {
-                thread?.start()
+                thread.start()
             }
         }
 
@@ -48,23 +47,26 @@ class ThreadPool(maxNumThreads: Int): Executor {
     private fun addThreadIfNecessary() {
         if (needsMoreThreads()) {
             threadLock.lock()
+            var thread: Thread? = null
             // try, finnally를 newThread에만 걸어도 되는건지, needsMoreThreads까지 포함해야하는건지 궁금.
             try {
                 if (needsMoreThreads()) {
-                    newThread()
+                    thread = newThread()
                 }
             } finally {
                 threadLock.unlock()
             }
 
+            thread?.start()
         }
     }
 
-    private fun newThread() {
+    private fun newThread(): Thread {
+        numThreads.incrementAndGet()
         numActiveThreads.incrementAndGet()
         val newThread = Thread {
+            var isActive = true
             try {
-                var isActive = true
                 while (true) {
                     try {
                         var task = queue.poll()
@@ -96,13 +98,20 @@ class ThreadPool(maxNumThreads: Int): Executor {
                     }
 
                 }
-                println("shutting down - ${Thread.currentThread().name}")
             } finally {
+                threadLock.lock()
+                try {
+                    threads.remove(Thread.currentThread())
+                } finally {
+                    threadLock.unlock()
+                }
+
                 numActiveThreads.decrementAndGet()
             }
+            println("shutting down - ${Thread.currentThread().name}")
         }
-        newThread.start()
         threads.add(newThread)
+        return newThread
     }
 
     private fun needsMoreThreads(): Boolean {
@@ -112,24 +121,38 @@ class ThreadPool(maxNumThreads: Int): Executor {
 
     fun shutdown() {
         if (shuttingDown.compareAndSet(false, true)) {
-            for (thread in threads) {
+            for (i in 0 ..< maxNumThreads) {
                 queue.add(SHUTDOWN_TASK)
             }
         }
-
-        for (thread in threads) {
-            if (thread == null) {
-                continue
+        while (true) {
+            val threads = arrayOfNulls<Thread>(this.threads.size)
+            threadLock.lock()
+            try {
+                this.threads.toArray(threads)
+            } finally {
+                threadLock.unlock()
             }
 
-            do {
-                try {
-                    thread.join()
-                } catch (_: InterruptedException) {
+            if (threads.isEmpty()) {
+                break
+            }
 
+
+            for (thread in threads) {
+                if (thread == null) {
+                    continue
                 }
 
-            } while (thread.isAlive)
+                do {
+                    try {
+                        thread.join()
+                    } catch (_: InterruptedException) {
+
+                    }
+
+                } while (thread.isAlive)
+            }
         }
     }
 }

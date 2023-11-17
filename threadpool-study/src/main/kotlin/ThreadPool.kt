@@ -1,3 +1,4 @@
+import java.lang.RuntimeException
 import java.util.concurrent.Executor
 import java.util.concurrent.LinkedTransferQueue
 import java.util.concurrent.atomic.AtomicBoolean
@@ -19,8 +20,13 @@ class ThreadPool(numThreads: Int): Executor {
         for (i in 0 ..< numThreads) {
             threads[i] = Thread {
                 while (true) {
-                    val task = queue.take()
-                    task.run()
+                    try {
+                        val task = queue.take()
+                        task.run()
+                    } catch (e: InterruptedException) {
+                        println("threadPool will be shutdown")
+                        throw RuntimeException()
+                    }
                 }
             }
         }
@@ -32,6 +38,12 @@ class ThreadPool(numThreads: Int): Executor {
             }
         }
         queue.add(command)
+    }
+
+    fun shutdown() {
+        for (thread in threads) {
+            thread?.interrupt()
+        }
     }
 
 }

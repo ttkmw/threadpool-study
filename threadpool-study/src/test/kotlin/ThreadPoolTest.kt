@@ -14,7 +14,7 @@ class ThreadPoolTest {
             for (i in 0 ..< numTasks) {
                 threadPool.execute {
                     println("thread ${Thread.currentThread().name} is running task: $i")
-                    Thread.sleep(200)
+                    Thread.sleep(700)
                 }
             }
         } finally {

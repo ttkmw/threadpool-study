@@ -9,10 +9,9 @@ import java.util.concurrent.locks.ReentrantLock
 * 문제점
 * 스레드 갯수를 정하는게 정적이다.
 * */
-class ThreadPool(maxNumThreads: Int): Executor {
+class ThreadPool(private val maxNumThreads: Int): Executor {
 
     private val SHUTDOWN_TASK = Runnable {  }
-    private var maxNumThreads: Int
     private val numActiveThreads = AtomicInteger()
     private val numThreads = AtomicInteger()
     private var threads = HashSet<Thread>()
@@ -20,17 +19,7 @@ class ThreadPool(maxNumThreads: Int): Executor {
     private val started = AtomicBoolean()
     private val shuttingDown = AtomicBoolean()
     private val threadLock = ReentrantLock()
-
-    init {
-        this.maxNumThreads = maxNumThreads
-    }
     override fun execute(command: Runnable) {
-        if (started.compareAndSet(false, true)) {
-            for (thread in threads) {
-                thread.start()
-            }
-        }
-
         if (shuttingDown.get()) {
             throw RejectedExecutionException()
         }
@@ -105,8 +94,10 @@ class ThreadPool(maxNumThreads: Int): Executor {
                 } finally {
                     threadLock.unlock()
                 }
-
-                numActiveThreads.decrementAndGet()
+                numThreads.decrementAndGet()
+                if (isActive) {
+                    numActiveThreads.decrementAndGet()
+                }
             }
             println("shutting down - ${Thread.currentThread().name}")
         }

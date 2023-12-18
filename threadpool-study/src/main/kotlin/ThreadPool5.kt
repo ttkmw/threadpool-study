@@ -87,6 +87,10 @@ class ThreadPool5(private val maxNumThreads: Int): Executor {
             }
 
             //스타트를 왜 newThread 밖에서 하는지 모름. 게다가 일부러 threadLock 밖에서 한것같은데... 이것도 이유를 모르겠음.
+            // lock 밖에서 호출한건데.
+            // 이유: lock window를 최소화하기 위함이라고 함.
+            // 이유: 다른 표현으로, 경쟁을 최소화하기 위해서 Lock window 밖에서 start한 것.
+            // lock window가 그럼 뭐야?
             newThread?.start()
         }
     }

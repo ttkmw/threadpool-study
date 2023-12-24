@@ -1,24 +1,26 @@
 import java.util.concurrent.Executor
 import java.util.concurrent.LinkedTransferQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
+import kotlin.time.Duration
 
 /*
 * 문제점
 * 스레드 갯수를 정하는게 정적이다.
 * */
-class ThreadPool(private val maxNumThreads: Int): Executor {
+class ThreadPool(private val maxNumThreads: Int, idleTimeout: Duration): Executor {
 
     private val SHUTDOWN_TASK = Runnable {  }
     private val numActiveThreads = AtomicInteger()
     private val numThreads = AtomicInteger()
-    private var threads = HashSet<Thread>()
+    var threads = HashSet<Thread>()
     private val queue = LinkedTransferQueue<Runnable>()
-    private val started = AtomicBoolean()
     private val shuttingDown = AtomicBoolean()
-    private val threadLock = ReentrantLock()
+    val threadLock = ReentrantLock()
+    private val idleTimeoutNanos = idleTimeout.inWholeNanoseconds
     override fun execute(command: Runnable) {
         if (shuttingDown.get()) {
             throw RejectedExecutionException()
@@ -55,6 +57,7 @@ class ThreadPool(private val maxNumThreads: Int): Executor {
         numActiveThreads.incrementAndGet()
         val newThread = Thread {
             var isActive = true
+            var lastRunTimeNanos = System.nanoTime()
             try {
                 while (true) {
                     try {
@@ -69,7 +72,11 @@ class ThreadPool(private val maxNumThreads: Int): Executor {
                                 isActive = false
                                 numActiveThreads.decrementAndGet()
                             }
-                            task = queue.take()
+                            val waitTimeoutNanos = idleTimeoutNanos - (System.nanoTime() - lastRunTimeNanos)
+                            task = queue.poll(waitTimeoutNanos, TimeUnit.NANOSECONDS)
+                            if (task == null) {
+                                break
+                            }
                             isActive = true
                             numActiveThreads.incrementAndGet()
                         }
@@ -77,7 +84,11 @@ class ThreadPool(private val maxNumThreads: Int): Executor {
                         if (task == SHUTDOWN_TASK) {
                             break
                         } else {
-                            task.run()
+                            try {
+                                task.run()
+                            } finally {
+                                lastRunTimeNanos = System.nanoTime()
+                            }
                         }
                     } catch (t: Throwable) {
                         if (t !is InterruptedException) {
@@ -85,7 +96,6 @@ class ThreadPool(private val maxNumThreads: Int): Executor {
                             t.printStackTrace()
                         }
                     }
-
                 }
             } finally {
                 threadLock.lock()

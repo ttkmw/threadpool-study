@@ -101,13 +101,22 @@ class ThreadPool(private val maxNumThreads: Int, idleTimeout: Duration): Executo
                 threadLock.lock()
                 try {
                     threads.remove(Thread.currentThread())
+                    numThreads.decrementAndGet()
+                    if (isActive) {
+                        numActiveThreads.decrementAndGet()
+                    }
+
+                    if (threads.isEmpty() && queue.isNotEmpty()) {
+                        for (task in queue) {
+                            if (task != SHUTDOWN_TASK) {
+                                println("!! Found there is remaining task but there is no thread to pick up the task")
+                            }
+                        }
+                    }
                 } finally {
                     threadLock.unlock()
                 }
-                numThreads.decrementAndGet()
-                if (isActive) {
-                    numActiveThreads.decrementAndGet()
-                }
+
             }
             println("shutting down - ${Thread.currentThread().name}")
         }

@@ -10,9 +10,9 @@ class ThreadPoolTest {
 
     @Test
     fun execute() {
-        val threadPool = ThreadPool(100, 1.toDuration(DurationUnit.SECONDS))
+        val threadPool = ThreadPool(1, 1.toDuration(DurationUnit.NANOSECONDS))
 
-        val numTasks = 100
+        val numTasks = 2
         val latch = CountDownLatch(numTasks)
         try {
             for (i in 0 ..< numTasks) {
@@ -27,20 +27,6 @@ class ThreadPoolTest {
                 }
             }
             latch.await()
-
-            while (true) {
-                threadPool.threadLock.lock()
-                var threads: Array<Thread>
-                try {
-                    threads = threadPool.threads.toTypedArray()
-                } finally {
-                    threadPool.threadLock.unlock()
-                }
-                for (thread in threads) {
-                    thread.interrupt()
-                    Thread.sleep(100)
-                }
-            }
 
         } finally {
             threadPool.shutdown()

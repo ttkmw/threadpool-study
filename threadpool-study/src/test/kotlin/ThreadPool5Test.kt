@@ -1,23 +1,27 @@
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Timeout
 
-import org.junit.jupiter.api.Assertions.*
-import java.util.concurrent.CountDownLatch
+import kotlin.time.DurationUnit
+import kotlin.time.toDuration
 
 class ThreadPool5Test {
 
     @Test
     fun execute() {
-        val threadPool5 = ThreadPool5(10)
-        val numTasks = 10
+        val threadPool5 = ThreadPool5(10, 1.toDuration(DurationUnit.NANOSECONDS))
+        val numTasks = 10000
         try {
             for (i in 0 ..< numTasks) {
-                threadPool5.execute {
-                    println("Thread ${Thread.currentThread().name} is running task : $i")
-//                    println("before sleep: ${threadPool5.numThreads.get()}, ${threadPool5.numActiveThreads.get()}, ${threadPool5.queue.size}")
-                    Thread.sleep(200)
-//                    println("after sleep: ${threadPool5.numThreads.get()}, ${threadPool5.numActiveThreads.get()}, ${threadPool5.queue.size}")
+                val task = object : Runnable {
+                    override fun run() {
+                        println("Thread ${Thread.currentThread().name} is running task : $i")
+                    }
+
+                    override fun toString(): String {
+                        return "Task $i"
+                    }
                 }
-//                Thread.sleep(20)
+                threadPool5.execute(task)
             }
         } finally {
             threadPool5.shutdown()

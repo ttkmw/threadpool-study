@@ -1,39 +1,67 @@
 import java.util.concurrent.Executor
 import java.util.concurrent.LinkedTransferQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
+import kotlin.time.Duration
 
-class ThreadPool5(private val maxNumThreads: Int): Executor {
-    private val threads = HashSet<Thread>(maxNumThreads)
+class ThreadPool5(private val maxNumThreads: Int, idleTimeout: Duration): Executor {
+    val threads = HashSet<Thread>(maxNumThreads)
     val numThreads = AtomicInteger()
-    val numActiveThreads = AtomicInteger()
-    private val started = AtomicBoolean()
+    val numBusyThreads = AtomicInteger()
     private val shutdown = AtomicBoolean()
     val queue = LinkedTransferQueue<Runnable>()
     private val SHUTDOWN_TASK = Runnable {}
-    private val threadLock = ReentrantLock()
+    val threadLock = ReentrantLock()
+    private val idleTimeoutNanos = idleTimeout.inWholeNanoseconds
 
     private fun newThread(): Thread {
         numThreads.incrementAndGet()
-        numActiveThreads.incrementAndGet()
+        numBusyThreads.incrementAndGet()
 
         val newThread = Thread {
+            println("Started a new thread: ${Thread.currentThread().name}")
+            var isBusy = true
+            var lastRuntimeNanos = System.nanoTime()
             try {
                 while (true) {
                     try {
                         var task = queue.poll()
                         if (task == null) {
-                            numActiveThreads.decrementAndGet()
-
-                            task = queue.take()
-                            numActiveThreads.incrementAndGet()
+                            if (isBusy) {
+                                isBusy = false
+                                numBusyThreads.decrementAndGet()
+                                println("${Thread.currentThread().name} idle")
+                            }
+                            val waitTimeoutNanos = idleTimeoutNanos - (System.nanoTime() - lastRuntimeNanos)
+                            if (waitTimeoutNanos <= 0) {
+                                println("${Thread.currentThread().name} waitTimeoutNanos $waitTimeoutNanos")
+                                break
+                            }
+                            task = queue.poll(waitTimeoutNanos, TimeUnit.NANOSECONDS)
+                            if (task == null) {
+                                break
+                            }
+                            isBusy = true
+                            numBusyThreads.incrementAndGet()
+                            println("${Thread.currentThread().name} busy")
+                        } else {
+                            if (!isBusy) {
+                                isBusy = true
+                                numBusyThreads.incrementAndGet()
+                                println("${Thread.currentThread().name} busy")
+                            }
                         }
                         if (task == SHUTDOWN_TASK) {
                             break
                         } else {
-                            task.run()
+                            try {
+                                task.run()
+                            } finally {
+                                lastRuntimeNanos = System.nanoTime()
+                            }
                         }
                     } catch (t: Throwable) {
                         if (t !is InterruptedException) {
@@ -49,11 +77,28 @@ class ThreadPool5(private val maxNumThreads: Int): Executor {
                 threadLock.lock()
                 try {
                     threads.remove(Thread.currentThread())
+                    numThreads.decrementAndGet()
+                    if (isBusy) {
+                        numBusyThreads.decrementAndGet()
+                        println("${Thread.currentThread().name} idle (timed out)")
+                    }
+
+                    if (threads.isEmpty() && queue.isNotEmpty()) {
+                        for (task in queue) {
+                            if (task != SHUTDOWN_TASK) {
+                                // We found the situation when
+                                // - there is no active threads and
+                                // - there are tasks in queue
+                                // Start a new thread so that it's picked up
+                                addThreadIfNecessary()
+                                break
+                            }
+                        }
+                    }
                 } finally {
                     threadLock.unlock()
                 }
-                numThreads.decrementAndGet()
-                numActiveThreads.decrementAndGet()
+
             }
         }
         threads.add(newThread)
@@ -97,7 +142,7 @@ class ThreadPool5(private val maxNumThreads: Int): Executor {
 
     private fun needsMoreThread(): Boolean {
         val numThreads = numThreads.get()
-        return numThreads < maxNumThreads && numActiveThreads.get() >= numThreads
+        return numThreads < maxNumThreads && numBusyThreads.get() >= numThreads
     }
 
     fun shutdown() {

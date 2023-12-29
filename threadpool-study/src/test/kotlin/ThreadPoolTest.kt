@@ -1,8 +1,6 @@
 import org.junit.jupiter.api.Test
 
-import org.junit.jupiter.api.Assertions.*
 import java.util.concurrent.CountDownLatch
-import kotlin.time.Duration
 import kotlin.time.DurationUnit
 import kotlin.time.toDuration
 
@@ -12,19 +10,21 @@ class ThreadPoolTest {
     fun execute() {
         val threadPool = ThreadPool(1, 1.toDuration(DurationUnit.NANOSECONDS))
 
-        val numTasks = 2
+        val numTasks = 10000
         val latch = CountDownLatch(numTasks)
         try {
-            for (i in 0 ..< numTasks) {
-                threadPool.execute {
-                    println("thread ${Thread.currentThread().name} is running task: $i")
-                    try {
-                        Thread.sleep(100)
-                    } catch (_: InterruptedException) {
-                        // I don't care
+            for (i in 0..<numTasks) {
+                val myRunnable = object : Runnable {
+                    override fun run() {
+                        println("thread ${Thread.currentThread().name} is running task $i")
+                        latch.countDown()
                     }
-                    latch.countDown()
+
+                    override fun toString(): String {
+                        return "Task $i"
+                    }
                 }
+                threadPool.execute(myRunnable)
             }
             latch.await()
 

@@ -9,28 +9,32 @@ import kotlin.time.Duration
 
 /*
 * 문제점
-* 스레드 갯수를 정하는게 정적이다.
+* 태스크를 실행할 때 스레드가 있다고 판단해서 스레드를 추가하지 않았다
+* 태스크a를 큐에 넣었다
+* 스레드를 종료했다.
+* 태스크a가 실행되지 않는다. - 문제
+*
 * */
 class ThreadPool(private val maxNumThreads: Int, idleTimeout: Duration): Executor {
 
     private val SHUTDOWN_TASK = Runnable {  }
-    private val numActiveThreads = AtomicInteger()
+    private val numBusyThreads = AtomicInteger()
     private val numThreads = AtomicInteger()
     var threads = HashSet<Thread>()
     private val queue = LinkedTransferQueue<Runnable>()
     private val shuttingDown = AtomicBoolean()
     val threadLock = ReentrantLock()
     private val idleTimeoutNanos = idleTimeout.inWholeNanoseconds
-    override fun execute(command: Runnable) {
+    override fun execute(task: Runnable) {
         if (shuttingDown.get()) {
             throw RejectedExecutionException()
         }
 
-        queue.add(command)
+        queue.add(task)
         addThreadIfNecessary()
 
         if (shuttingDown.get()) {
-            queue.remove(command)
+            queue.remove(task)
             throw RejectedExecutionException()
         }
     }
@@ -39,7 +43,7 @@ class ThreadPool(private val maxNumThreads: Int, idleTimeout: Duration): Executo
         if (needsMoreThreads()) {
             threadLock.lock()
             var thread: Thread? = null
-            // try, finnally를 newThread에만 걸어도 되는건지, needsMoreThreads까지 포함해야하는건지 궁금.
+            // try, finally를 newThread에만 걸어도 되는건지, needsMoreThreads까지 포함해야하는건지 궁금.
             try {
                 if (needsMoreThreads()) {
                     thread = newThread()
@@ -54,31 +58,39 @@ class ThreadPool(private val maxNumThreads: Int, idleTimeout: Duration): Executo
 
     private fun newThread(): Thread {
         numThreads.incrementAndGet()
-        numActiveThreads.incrementAndGet()
+        numBusyThreads.incrementAndGet()
         val newThread = Thread {
-            var isActive = true
+            println("Started a new thread: ${Thread.currentThread().name}")
+            var isBusy = true
             var lastRunTimeNanos = System.nanoTime()
             try {
                 while (true) {
                     try {
                         var task = queue.poll()
                         if (task != null) {
-                            if (!isActive) {
-                                isActive = true
-                                numActiveThreads.incrementAndGet()
+                            if (!isBusy) {
+                                isBusy = true
+                                numBusyThreads.incrementAndGet()
+                                println("${Thread.currentThread().name} busy")
                             }
                         } else {
-                            if (isActive) {
-                                isActive = false
-                                numActiveThreads.decrementAndGet()
+                            if (isBusy) {
+                                isBusy = false
+                                numBusyThreads.decrementAndGet()
+                                println("${Thread.currentThread().name} idle")
                             }
                             val waitTimeoutNanos = idleTimeoutNanos - (System.nanoTime() - lastRunTimeNanos)
+                            if (waitTimeoutNanos <= 0) {
+                                break
+                            }
+
                             task = queue.poll(waitTimeoutNanos, TimeUnit.NANOSECONDS)
                             if (task == null) {
                                 break
                             }
-                            isActive = true
-                            numActiveThreads.incrementAndGet()
+                            isBusy = true
+                            numBusyThreads.incrementAndGet()
+                            println("${Thread.currentThread().name} busy")
                         }
 
                         if (task == SHUTDOWN_TASK) {
@@ -102,14 +114,20 @@ class ThreadPool(private val maxNumThreads: Int, idleTimeout: Duration): Executo
                 try {
                     threads.remove(Thread.currentThread())
                     numThreads.decrementAndGet()
-                    if (isActive) {
-                        numActiveThreads.decrementAndGet()
+                    if (isBusy) {
+                        numBusyThreads.decrementAndGet()
+                        println("${Thread.currentThread().name} idle (timed out)")
                     }
 
                     if (threads.isEmpty() && queue.isNotEmpty()) {
                         for (task in queue) {
                             if (task != SHUTDOWN_TASK) {
-                                println("!! Found there is remaining task but there is no thread to pick up the task")
+                                // We found the situation when
+                                // - there are no active threads available and
+                                // - there are tasks in the queue
+                                // Start a new thread so that it's picked up
+                                addThreadIfNecessary()
+                                break
                             }
                         }
                     }
@@ -125,8 +143,8 @@ class ThreadPool(private val maxNumThreads: Int, idleTimeout: Duration): Executo
     }
 
     private fun needsMoreThreads(): Boolean {
-        val numActiveThreads = this.numActiveThreads.get();
-        return numActiveThreads < maxNumThreads && numActiveThreads >= threads.size
+        val numBusyThreads = this.numBusyThreads.get();
+        return numBusyThreads >= numThreads.get() && numBusyThreads < maxNumThreads
     }
 
     fun shutdown() {

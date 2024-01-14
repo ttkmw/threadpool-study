@@ -118,7 +118,7 @@ class ThreadPool6(private val minNumWorkers: Int, private val maxNumWorkers: Int
     private fun newWorker(workerType: WorkerType): Worker {
         numWorkers.incrementAndGet()
         numBusyWorkers.incrementAndGet()
-        val worker =  Worker(workerType)
+        val worker = Worker(workerType)
         workers.add(worker)
         return worker
     }

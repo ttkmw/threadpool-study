@@ -9,7 +9,7 @@ class ThreadPool6Test {
 
     @Test
     fun execute() {
-        val threadPool6 = ThreadPool6(10, 1.toDuration(DurationUnit.SECONDS))
+        val threadPool6 = ThreadPool6(3, 6, 1.toDuration(DurationUnit.NANOSECONDS))
         val numTasks = 100
 //        val latch = CountDownLatch(numTasks)
 
@@ -19,7 +19,6 @@ class ThreadPool6Test {
                     override fun run() {
                         println("${Thread.currentThread().name} is running: task $i")
                     }
-
                     override fun toString(): String {
                         return "task $i"
                     }

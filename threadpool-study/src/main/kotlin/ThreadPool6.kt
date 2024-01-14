@@ -7,23 +7,24 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.time.Duration
 
-class ThreadPool6(private val maxNumThreads: Int, idleTimeout: Duration): Executor {
-    private val threads = HashSet<Thread>()
-    private val numThreads = AtomicInteger()
-    private val numBusyThreads = AtomicInteger()
+class ThreadPool6(private val minNumWorkers: Int, private val maxNumWorkers: Int, idleTimeout: Duration): Executor {
+    private val workers = HashSet<Worker>()
+    private val numWorkers = AtomicInteger()
+    private val numBusyWorkers = AtomicInteger()
     private val queue = LinkedTransferQueue<Runnable>()
     private val shutdown = AtomicBoolean()
-    private val threadLock = ReentrantLock()
+    private val workerLock = ReentrantLock()
     private val idleTimeoutNanos = idleTimeout.inWholeNanoseconds
-    companion object {
-        val SHUTDOWN_TASK = Runnable {}
-    }
 
-    private fun newThread(): Thread {
-        numThreads.incrementAndGet()
-        numBusyThreads.incrementAndGet()
-        val newThread =  Thread {
-            println("Start a new thread: ${Thread.currentThread().name}")
+    inner class Worker(private val type: WorkerType) {
+        private val thread = Thread(this::work)
+
+        fun start() {
+            this.thread.start()
+        }
+
+        private fun work() {
+            println("Start a new worker: ${Thread.currentThread().name}")
             var isBusy = true
             var lastRuntimeNanos = System.nanoTime()
             try {
@@ -33,29 +34,36 @@ class ThreadPool6(private val maxNumThreads: Int, idleTimeout: Duration): Execut
                         if (task != null) {
                             if (!isBusy) {
                                 isBusy = true
-                                numBusyThreads.incrementAndGet()
+                                numBusyWorkers.incrementAndGet()
                                 println("${Thread.currentThread().name} busy")
                             }
                         } else {
                             if (isBusy) {
                                 isBusy = false
-                                numBusyThreads.decrementAndGet()
+                                numBusyWorkers.decrementAndGet()
                                 println("${Thread.currentThread().name} idle")
                             }
-                            val waitTimeoutNanos = idleTimeoutNanos - (System.nanoTime() - lastRuntimeNanos)
-                            if (waitTimeoutNanos <= 0) {
-                                break
+                            when (type) {
+                                WorkerType.CORE -> {
+                                    task = queue.take()
+                                }
+                                WorkerType.EXTRA -> {
+                                    val waitTimeoutNanos = idleTimeoutNanos - (System.nanoTime() - lastRuntimeNanos)
+                                    task = queue.poll(waitTimeoutNanos, TimeUnit.NANOSECONDS)
+                                    if (waitTimeoutNanos <= 0 || task == null) {
+                                        println("${Thread.currentThread().name} hit by timed out")
+                                        break
+                                    }
+                                }
                             }
-                            task = queue.poll(waitTimeoutNanos, TimeUnit.NANOSECONDS)
-                            if (task == null) {
-                                break
-                            }
+
                             isBusy = true
-                            numBusyThreads.incrementAndGet()
+                            numBusyWorkers.incrementAndGet()
                             println("${Thread.currentThread().name} busy")
                         }
 
                         if (task == SHUTDOWN_TASK) {
+                            println("${Thread.currentThread().name} received poison pill")
                             break
                         } else {
                             try {
@@ -72,30 +80,47 @@ class ThreadPool6(private val maxNumThreads: Int, idleTimeout: Duration): Execut
                     }
                 }
             } finally {
-                threadLock.lock()
+                workerLock.lock()
                 try {
-                    threads.remove(Thread.currentThread())
-                    numThreads.decrementAndGet()
+                    println("removed: ${Thread.currentThread().name}")
+                    workers.remove(this)
+                    numWorkers.decrementAndGet()
                     if (isBusy) {
-                        numBusyThreads.decrementAndGet()
-                        println("${Thread.currentThread().name} idle (timed out)")
+                        numBusyWorkers.decrementAndGet()
                     }
-                    if (threads.isEmpty() && queue.isNotEmpty()) {
+                    if (workers.isEmpty() && queue.isNotEmpty()) {
                         for (task in queue) {
                             if (task != SHUTDOWN_TASK) {
-                                addThreadIfNecessary()
+                                addWorkersIfNecessary()
                                 break
                             }
                         }
                     }
                 } finally {
-                    threadLock.unlock()
+                    workerLock.unlock()
                 }
             }
-            println("shutting down - ${Thread.currentThread().name}")
+            println("shutting down - ${Thread.currentThread().name} (${type})")
         }
-        threads.add(newThread)
-        return newThread
+
+        fun join() {
+            while (thread.isAlive) {
+                try {
+                    thread.join()
+                } catch (_: InterruptedException) {}
+            }
+        }
+    }
+    companion object {
+        val SHUTDOWN_TASK = Runnable {}
+    }
+
+    private fun newWorker(workerType: WorkerType): Worker {
+        numWorkers.incrementAndGet()
+        numBusyWorkers.incrementAndGet()
+        val worker =  Worker(workerType)
+        workers.add(worker)
+        return worker
     }
 
     override fun execute(task: Runnable) {
@@ -103,7 +128,7 @@ class ThreadPool6(private val maxNumThreads: Int, idleTimeout: Duration): Execut
             throw RejectedExecutionException()
         }
         queue.add(task)
-        addThreadIfNecessary()
+        addWorkersIfNecessary()
 
         if (shutdown.get()) {
             queue.remove(task)
@@ -111,26 +136,37 @@ class ThreadPool6(private val maxNumThreads: Int, idleTimeout: Duration): Execut
         }
     }
 
-    private fun addThreadIfNecessary() {
-        if (needsMoreThread()) {
-            threadLock.lock()
-            var newThread: Thread? = null
+    private fun addWorkersIfNecessary() {
+        if (needsMoreThread() != null) {
+            workerLock.lock()
+            var newWorkers: MutableList<Worker>? = null
             try {
-                //4. shutdown은 왜 체크하는거였지?
-                if (needsMoreThread() && !shutdown.get()) {
-                    newThread = newThread()
+                while (!shutdown.get()) {
+                    val workerType = needsMoreThread() ?: break
+                    if (newWorkers == null) {
+                        newWorkers = mutableListOf()
+                    }
+                    newWorkers.add(newWorker(workerType))
                 }
             } finally {
-                threadLock.unlock()
+                workerLock.unlock()
             }
-            newThread?.start()
+            newWorkers?.forEach { it.start() }
         }
     }
 
-    private fun needsMoreThread(): Boolean {
-        val numBusyThreads = numBusyThreads.get()
-        val numThreads = numThreads.get()
-        return numBusyThreads >= numThreads && numThreads < maxNumThreads
+    private fun needsMoreThread(): WorkerType? {
+        val numBusyThreads = numBusyWorkers.get()
+        val numThreads = numWorkers.get()
+
+        if (numThreads < minNumWorkers) {
+            return WorkerType.CORE
+        }
+
+        if (numBusyThreads >= numThreads && numThreads < maxNumWorkers) {
+            return WorkerType.EXTRA
+        }
+        return null
     }
 
     fun shutdown() {
@@ -139,32 +175,35 @@ class ThreadPool6(private val maxNumThreads: Int, idleTimeout: Duration): Execut
         // 예를들어, 스레드풀(P1)가 execute하여 하나의 스레드(C1)가 하나의 태스크A를 run 했고, 태스크A에는 @Transactional이 붙어있어서 원자적이길 기대되고 있다. 태스크A는 먼저 쿼리A를 데이터베이스에 날리고 Thread.sleep해서 100초간 멈춘 후 쿼리B를 날리는 코드로 되어있다. 그때 P1이 shutdown을 호출해서 C1이 wakeup 했다. C1은 쿼리A를 쏘는 코드는 호출하고 쿼리B를 쏘는 코드는 호출하지 않았는데,
         // C1은 InterruptedException을 무시했고 그래서 롤백되지 않았다.
         if (shutdown.compareAndSet(false, true)) {
-            for (thread in threads) {
+            for (thread in 0 ..< maxNumWorkers) {
                 queue.add(SHUTDOWN_TASK)
             }
         }
         while (true) {
-            val threads: Array<Thread>
-            threadLock.lock()
+            val workers: Array<Worker>
+            workerLock.lock()
             try {
-                threads = this.threads.toTypedArray()
+                workers = this.workers.toTypedArray()
             } finally {
-                threadLock.unlock()
+                workerLock.unlock()
             }
 
-            if (threads.isEmpty()) {
-                println("broke")
+            if (workers.isEmpty()) {
                 break
             }
 
-            for (thread in threads) {
+
+            for (worker in workers) {
 //                질문1 왜 여기서 while true를 쓰는걸까? 그냥 한번만 join 해도 될 것 같은데... interrupt 호출될수도 있어서 그런가? 누가 interrupt할 수 있는거지?
-                do {
-                    try {
-                        thread.join()
-                    } catch (_: InterruptedException) {}
-                } while (thread.isAlive)
+                worker.join()
             }
         }
     }
+
+    enum class WorkerType {
+        CORE,
+        EXTRA
+    }
+
+
 }

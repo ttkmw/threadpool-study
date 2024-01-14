@@ -15,15 +15,15 @@ import kotlin.time.Duration
 * 태스크a가 실행되지 않는다. - 문제
 *
 * */
-class ThreadPool(private val maxNumThreads: Int, idleTimeout: Duration): Executor {
+class ThreadPool(private val minNumWorkers: Int, private val maxNumWorkers: Int, idleTimeout: Duration) : Executor {
 
-    private val SHUTDOWN_TASK = Runnable {  }
-    private val numBusyThreads = AtomicInteger()
-    private val numThreads = AtomicInteger()
-    var threads = HashSet<Thread>()
+    private val SHUTDOWN_TASK = Runnable { }
+    private val numBusyWorkers = AtomicInteger()
+    private val numWorkers = AtomicInteger()
+    var workers = HashSet<Worker>()
     private val queue = LinkedTransferQueue<Runnable>()
     private val shuttingDown = AtomicBoolean()
-    val threadLock = ReentrantLock()
+    val workersLock = ReentrantLock()
     private val idleTimeoutNanos = idleTimeout.inWholeNanoseconds
     override fun execute(task: Runnable) {
         if (shuttingDown.get()) {
@@ -31,7 +31,7 @@ class ThreadPool(private val maxNumThreads: Int, idleTimeout: Duration): Executo
         }
 
         queue.add(task)
-        addThreadIfNecessary()
+        addWorkerIfNecessary()
 
         if (shuttingDown.get()) {
             queue.remove(task)
@@ -39,28 +39,19 @@ class ThreadPool(private val maxNumThreads: Int, idleTimeout: Duration): Executo
         }
     }
 
-    private fun addThreadIfNecessary() {
-        if (needsMoreThreads()) {
-            threadLock.lock()
-            var thread: Thread? = null
-            // try, finally를 newThread에만 걸어도 되는건지, needsMoreThreads까지 포함해야하는건지 궁금.
-            try {
-                if (needsMoreThreads()) {
-                    thread = newThread()
-                }
-            } finally {
-                threadLock.unlock()
-            }
+    inner class Worker(private val workerType: WorkerType) {
+        private val thread: Thread
 
-            thread?.start()
+        init {
+            thread = Thread(this::work)
         }
-    }
 
-    private fun newThread(): Thread {
-        numThreads.incrementAndGet()
-        numBusyThreads.incrementAndGet()
-        val newThread = Thread {
-            println("Started a new thread: ${Thread.currentThread().name}")
+        fun start() {
+            thread.start()
+        }
+
+        private fun work() {
+            println("Started a new worker: ${Thread.currentThread().name}")
             var isBusy = true
             var lastRunTimeNanos = System.nanoTime()
             try {
@@ -70,30 +61,43 @@ class ThreadPool(private val maxNumThreads: Int, idleTimeout: Duration): Executo
                         if (task != null) {
                             if (!isBusy) {
                                 isBusy = true
-                                numBusyThreads.incrementAndGet()
+                                numBusyWorkers.incrementAndGet()
                                 println("${Thread.currentThread().name} busy")
                             }
                         } else {
                             if (isBusy) {
                                 isBusy = false
-                                numBusyThreads.decrementAndGet()
+                                numBusyWorkers.decrementAndGet()
                                 println("${Thread.currentThread().name} idle")
                             }
-                            val waitTimeoutNanos = idleTimeoutNanos - (System.nanoTime() - lastRunTimeNanos)
-                            if (waitTimeoutNanos <= 0) {
-                                break
+
+                            when (workerType) {
+                                WorkerType.CORE -> {
+                                    task = queue.take()
+                                }
+
+                                WorkerType.EXTRA -> {
+                                    val waitTimeoutNanos = idleTimeoutNanos - (System.nanoTime() - lastRunTimeNanos)
+                                    if (waitTimeoutNanos <= 0) {
+                                        println("${Thread.currentThread().name} hit by idle timeout")
+                                        break
+                                    }
+
+                                    task = queue.poll(waitTimeoutNanos, TimeUnit.NANOSECONDS)
+                                    if (task == null) {
+                                        println("${Thread.currentThread().name} hit by idle timeout")
+                                        break
+                                    }
+                                }
                             }
 
-                            task = queue.poll(waitTimeoutNanos, TimeUnit.NANOSECONDS)
-                            if (task == null) {
-                                break
-                            }
                             isBusy = true
-                            numBusyThreads.incrementAndGet()
+                            numBusyWorkers.incrementAndGet()
                             println("${Thread.currentThread().name} busy")
                         }
 
                         if (task == SHUTDOWN_TASK) {
+                            println("${Thread.currentThread().name} received poison pill")
                             break
                         } else {
                             try {
@@ -110,77 +114,147 @@ class ThreadPool(private val maxNumThreads: Int, idleTimeout: Duration): Executo
                     }
                 }
             } finally {
-                threadLock.lock()
+                workersLock.lock()
                 try {
-                    threads.remove(Thread.currentThread())
-                    numThreads.decrementAndGet()
-                    if (isBusy) {
-                        numBusyThreads.decrementAndGet()
-                        println("${Thread.currentThread().name} idle (timed out)")
-                    }
+                    workers.remove(this)
+                    numWorkers.decrementAndGet()
+                    numBusyWorkers.decrementAndGet() // Was busy handling the 'SHUTDOWN_TASK'
 
-                    if (threads.isEmpty() && queue.isNotEmpty()) {
+                    if (workers.isEmpty() && queue.isNotEmpty()) {
                         for (task in queue) {
                             if (task != SHUTDOWN_TASK) {
                                 // We found the situation when
                                 // - there are no active threads available and
                                 // - there are tasks in the queue
                                 // Start a new thread so that it's picked up
-                                addThreadIfNecessary()
+                                addWorkerIfNecessary()
                                 break
                             }
                         }
                     }
                 } finally {
-                    threadLock.unlock()
+                    workersLock.unlock()
                 }
-
+                println("shutting down - ${Thread.currentThread().name} + (${workerType})")
             }
-            println("shutting down - ${Thread.currentThread().name}")
         }
-        threads.add(newThread)
-        return newThread
+
+        fun join() {
+            while (thread.isAlive) {
+                try {
+                    thread.join()
+                } catch (_: InterruptedException) {
+
+                }
+            }
+        }
     }
 
-    private fun needsMoreThreads(): Boolean {
-        val numBusyThreads = this.numBusyThreads.get();
-        return numBusyThreads >= numThreads.get() && numBusyThreads < maxNumThreads
+    private fun addWorkerIfNecessary() {
+        if (needsMoreWorker() != null) {
+            workersLock.lock()
+            var newWorkers: MutableList<Worker>? = null
+            // try, finally를 newThread에만 걸어도 되는건지, needsMoreThreads까지 포함해야하는건지 궁금.
+            try {
+
+                while (!shuttingDown.get()) {
+                    val workerType = needsMoreWorker()
+                    if (workerType != null) {
+                        if (newWorkers == null) {
+                            newWorkers = ArrayList()
+                        }
+                        newWorkers.add(newWorker(workerType))
+                    } else {
+                        break
+                    }
+                }
+            } finally {
+                workersLock.unlock()
+            }
+
+            newWorkers?.forEach(Worker::start)
+        }
+    }
+
+    private fun newWorker(workerType: WorkerType): Worker {
+        numWorkers.incrementAndGet()
+        numBusyWorkers.incrementAndGet()
+        val newWorker = Worker(workerType)
+        workers.add(newWorker)
+        return newWorker
+    }
+
+    private enum class WorkerTerminationReason {
+        IDLE,
+        SHUTDOWN
+    }
+
+    enum class WorkerType {
+        /**
+         * the core worker that does not get terminated due to idle timeout
+         * it's terminated only by {@see #SHUTDOWN_TASk}, which is terminated when the thread pool is shutdown
+         */
+        CORE,
+
+        /**
+         * the worker that can be terminated due to idle timeout
+         */
+        EXTRA
+    }
+
+    /**
+     * Returns the worker type if more worker is needed to handle newly submitted task.
+     * {@code null} is returned if no worker is needed
+     */
+    private fun needsMoreWorker(): WorkerType? {
+        val numBusyWorkers = this.numBusyWorkers.get();
+        val numWorkers = numWorkers.get()
+        // Needs more threads if there are too few threads; we need at least `minNumThreads` threads
+        if (numWorkers < minNumWorkers) {
+            return WorkerType.CORE
+        }
+        // Needs more threads if all threads are busy
+        if (numBusyWorkers >= numWorkers) {
+            // But we shouldn't create more threads than `maxNumThreads`
+            if (numBusyWorkers < maxNumWorkers) {
+                return WorkerType.EXTRA
+            }
+        }
+
+        return null
+
+
     }
 
     fun shutdown() {
         if (shuttingDown.compareAndSet(false, true)) {
-            for (i in 0 ..< maxNumThreads) {
+            for (i in 0..<maxNumWorkers) {
                 queue.add(SHUTDOWN_TASK)
             }
         }
         while (true) {
-            val threads = arrayOfNulls<Thread>(this.threads.size)
-            threadLock.lock()
+            val workers = arrayOfNulls<Worker>(this.workers.size)
+            workersLock.lock()
             try {
-                this.threads.toArray(threads)
+                this.workers.toArray(workers)
             } finally {
-                threadLock.unlock()
+                workersLock.unlock()
             }
 
-            if (threads.isEmpty()) {
+            if (workers.isEmpty()) {
                 break
             }
 
 
-            for (thread in threads) {
-                if (thread == null) {
+            for (worker in workers) {
+
+                if (worker == null) {
                     continue
                 }
-
-                do {
-                    try {
-                        thread.join()
-                    } catch (_: InterruptedException) {
-
-                    }
-
-                } while (thread.isAlive)
+                worker.join()
             }
         }
     }
+
+
 }

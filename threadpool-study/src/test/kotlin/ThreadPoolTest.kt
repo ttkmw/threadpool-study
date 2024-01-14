@@ -8,7 +8,7 @@ class ThreadPoolTest {
 
     @Test
     fun execute() {
-        val threadPool = ThreadPool(1, 1.toDuration(DurationUnit.NANOSECONDS))
+        val threadPool = ThreadPool(3, 6, 1.toDuration(DurationUnit.NANOSECONDS))
 
         val numTasks = 10000
         val latch = CountDownLatch(numTasks)

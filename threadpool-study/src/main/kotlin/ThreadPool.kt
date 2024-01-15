@@ -5,7 +5,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
-import kotlin.time.Duration
 
 /*
 * 문제점
@@ -15,16 +14,34 @@ import kotlin.time.Duration
 * 태스크a가 실행되지 않는다. - 문제
 *
 * */
-class ThreadPool(private val minNumWorkers: Int, private val maxNumWorkers: Int, idleTimeout: Duration) : Executor {
+class ThreadPool (private val minNumWorkers: Int, private val maxNumWorkers: Int,
+                             private val idleTimeoutNanos: Long
+) : Executor {
 
-    private val SHUTDOWN_TASK = Runnable { }
+
+    companion object {
+        private val SHUTDOWN_TASK = Runnable { }
+
+        fun of(maxNumWorkers: Int): ThreadPool {
+            return builder(maxNumWorkers).build()
+        }
+
+        fun of(minNumWorkers: Int, maxNumWorkers: Int): ThreadPool {
+            return builder(maxNumWorkers).minNumWorkers(minNumWorkers).build()
+        }
+
+        fun builder(maxNumWorkers: Int): ThreadPoolBuilder {
+            return ThreadPoolBuilder(maxNumWorkers)
+        }
+    }
+
+
     private val numBusyWorkers = AtomicInteger()
     private val numWorkers = AtomicInteger()
     var workers = HashSet<Worker>()
     private val queue = LinkedTransferQueue<Runnable>()
     private val shuttingDown = AtomicBoolean()
     val workersLock = ReentrantLock()
-    private val idleTimeoutNanos = idleTimeout.inWholeNanoseconds
     override fun execute(task: Runnable) {
         if (shuttingDown.get()) {
             throw RejectedExecutionException()
@@ -39,7 +56,7 @@ class ThreadPool(private val minNumWorkers: Int, private val maxNumWorkers: Int,
         }
     }
 
-    inner class Worker(private val workerType: WorkerType) {
+    inner class Worker(private val expirationMode: ExpirationMode) {
         private val thread: Thread
 
         init {
@@ -71,12 +88,12 @@ class ThreadPool(private val minNumWorkers: Int, private val maxNumWorkers: Int,
                                 println("${Thread.currentThread().name} idle")
                             }
 
-                            when (workerType) {
-                                WorkerType.CORE -> {
+                            when (expirationMode) {
+                                ExpirationMode.NEVER -> {
                                     task = queue.take()
                                 }
 
-                                WorkerType.EXTRA -> {
+                                ExpirationMode.ON_IDLE -> {
                                     val waitTimeoutNanos = idleTimeoutNanos - (System.nanoTime() - lastRunTimeNanos)
                                     if (waitTimeoutNanos <= 0) {
                                         println("${Thread.currentThread().name} hit by idle timeout")
@@ -135,7 +152,7 @@ class ThreadPool(private val minNumWorkers: Int, private val maxNumWorkers: Int,
                 } finally {
                     workersLock.unlock()
                 }
-                println("shutting down - ${Thread.currentThread().name} + (${workerType})")
+                println("shutting down - ${Thread.currentThread().name} + (${expirationMode})")
             }
         }
 
@@ -158,12 +175,12 @@ class ThreadPool(private val minNumWorkers: Int, private val maxNumWorkers: Int,
             try {
 
                 while (!shuttingDown.get()) {
-                    val workerType = needsMoreWorker()
-                    if (workerType != null) {
+                    val expirationMode = needsMoreWorker()
+                    if (expirationMode != null) {
                         if (newWorkers == null) {
                             newWorkers = ArrayList()
                         }
-                        newWorkers.add(newWorker(workerType))
+                        newWorkers.add(newWorker(expirationMode))
                     } else {
                         break
                     }
@@ -176,10 +193,10 @@ class ThreadPool(private val minNumWorkers: Int, private val maxNumWorkers: Int,
         }
     }
 
-    private fun newWorker(workerType: WorkerType): Worker {
+    private fun newWorker(expirationMode: ExpirationMode): Worker {
         numWorkers.incrementAndGet()
         numBusyWorkers.incrementAndGet()
-        val newWorker = Worker(workerType)
+        val newWorker = Worker(expirationMode)
         workers.add(newWorker)
         return newWorker
     }
@@ -189,35 +206,34 @@ class ThreadPool(private val minNumWorkers: Int, private val maxNumWorkers: Int,
         SHUTDOWN
     }
 
-    enum class WorkerType {
+    enum class ExpirationMode {
         /**
-         * the core worker that does not get terminated due to idle timeout
-         * it's terminated only by {@see #SHUTDOWN_TASk}, which is terminated when the thread pool is shutdown
+         * the worker that never gets terminated
          */
-        CORE,
+        NEVER,
 
         /**
          * the worker that can be terminated due to idle timeout
          */
-        EXTRA
+        ON_IDLE
     }
 
     /**
      * Returns the worker type if more worker is needed to handle newly submitted task.
      * {@code null} is returned if no worker is needed
      */
-    private fun needsMoreWorker(): WorkerType? {
+    private fun needsMoreWorker(): ExpirationMode? {
         val numBusyWorkers = this.numBusyWorkers.get();
         val numWorkers = numWorkers.get()
         // Needs more threads if there are too few threads; we need at least `minNumThreads` threads
         if (numWorkers < minNumWorkers) {
-            return WorkerType.CORE
+            return ExpirationMode.NEVER
         }
         // Needs more threads if all threads are busy
         if (numBusyWorkers >= numWorkers) {
             // But we shouldn't create more threads than `maxNumThreads`
             if (numBusyWorkers < maxNumWorkers) {
-                return WorkerType.EXTRA
+                return if (idleTimeoutNanos >0 ) ExpirationMode.ON_IDLE else ExpirationMode.NEVER
             }
         }
 

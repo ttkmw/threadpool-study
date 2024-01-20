@@ -1,3 +1,5 @@
+package draft
+
 import draft.ThreadPool2
 import org.junit.jupiter.api.Test
 import java.util.concurrent.CountDownLatch

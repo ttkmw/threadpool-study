@@ -1,3 +1,5 @@
+package draft
+
 import draft.concurrencystudy.ReentrantLockStudy
 import org.junit.jupiter.api.Test
 

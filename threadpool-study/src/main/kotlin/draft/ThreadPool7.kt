@@ -7,9 +7,12 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
-import kotlin.time.Duration
 
-class ThreadPool7(private val minNumWorkers: Int, private val maxNumWorkers: Int, idleTimeout: Duration) : Executor {
+class ThreadPool7 internal constructor(
+    private val minNumWorkers: Int,
+    private val maxNumWorkers: Int,
+    private val idleTimeoutNanos: Long
+) : Executor {
     private val workers = HashSet<Worker>()
     private val numWorkers = AtomicInteger()
     private val numBusyWorkers = AtomicInteger()
@@ -17,16 +20,30 @@ class ThreadPool7(private val minNumWorkers: Int, private val maxNumWorkers: Int
     private val started = AtomicBoolean()
     private val shutdown = AtomicBoolean()
     private val workerLock = ReentrantLock()
-    private val idleTimeoutNanos = idleTimeout.inWholeNanoseconds
 
     companion object {
         private val SHUTDOWN_TASK = Runnable { }
+
+        fun of(maxNumWorkers: Int): ThreadPool7 {
+            return builder(maxNumWorkers = maxNumWorkers)
+                .build()
+        }
+
+        fun of(minNumWorkers: Int, maxNumWorkers: Int): ThreadPool7 {
+            return builder(maxNumWorkers = maxNumWorkers)
+                .minNumWorkers(minNumWorkers = minNumWorkers)
+                .build()
+        }
+
+        fun builder(maxNumWorkers: Int): ThreadPoolBuilder7 {
+            return ThreadPoolBuilder7(maxNumWorkers = maxNumWorkers)
+        }
     }
 
-    private fun newWorker(workerType: WorkerType): Worker {
+    private fun newWorker(EXPIRATIONMODE: ExpirationMode): Worker {
         numWorkers.incrementAndGet()
         numBusyWorkers.incrementAndGet()
-        val newWorker = Worker(workerType)
+        val newWorker = Worker(EXPIRATIONMODE)
 
         // 이희승님은 여기서 lock 안걸었는데... 왜 lock 안거신지 모르겠음 락 걸어야할것같은데.
         workerLock.lock()
@@ -81,14 +98,14 @@ class ThreadPool7(private val minNumWorkers: Int, private val maxNumWorkers: Int
         }
     }
 
-    private fun needsMoreWorker(): WorkerType? {
+    private fun needsMoreWorker(): ExpirationMode? {
         val numWorkers = numWorkers.get()
         val numBusyWorkers = numBusyWorkers.get()
         if (numWorkers < minNumWorkers) {
-            return WorkerType.CORE
+            return ExpirationMode.NEVER
         }
         if (numBusyWorkers >= numWorkers && numWorkers < maxNumWorkers) {
-            return WorkerType.EXTRA
+            return if (idleTimeoutNanos > 0) ExpirationMode.ON_IDLE else ExpirationMode.NEVER
         }
         return null
     }
@@ -121,12 +138,12 @@ class ThreadPool7(private val minNumWorkers: Int, private val maxNumWorkers: Int
         }
     }
 
-    enum class WorkerType {
-        CORE,
-        EXTRA
+    enum class ExpirationMode {
+        NEVER,
+        ON_IDLE
     }
 
-    inner class Worker(private val workerType: WorkerType) {
+    inner class Worker(private val EXPIRATIONMODE: ExpirationMode) {
         private val thread = Thread(this::work)
 
         private fun work() {
@@ -142,11 +159,12 @@ class ThreadPool7(private val minNumWorkers: Int, private val maxNumWorkers: Int
                                 numBusyWorkers.decrementAndGet()
                             }
 
-                            when (workerType) {
-                                WorkerType.CORE -> {
+                            when (EXPIRATIONMODE) {
+                                ExpirationMode.NEVER -> {
                                     task = queue.take()
                                 }
-                                WorkerType.EXTRA -> {
+
+                                ExpirationMode.ON_IDLE -> {
                                     val waitTimeNanos = idleTimeoutNanos - (System.nanoTime() - lastRuntimeNanos)
                                     task = queue.poll(waitTimeNanos, TimeUnit.NANOSECONDS)
                                     if (waitTimeNanos <= 0 || task == null) {
@@ -202,7 +220,7 @@ class ThreadPool7(private val minNumWorkers: Int, private val maxNumWorkers: Int
                     workerLock.unlock()
                 }
 
-                println("${Thread.currentThread().name} ($workerType) is shutting down")
+                println("${Thread.currentThread().name} ($EXPIRATIONMODE) is shutting down")
             }
         }
 

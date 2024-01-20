@@ -1,4 +1,5 @@
-import draft.ThreadPool7
+package draft
+
 import org.junit.jupiter.api.Test
 
 import kotlin.time.DurationUnit
@@ -8,7 +9,10 @@ class ThreadPool7Test {
 
     @Test
     fun execute() {
-        val threadPool7 = ThreadPool7(1,5, 1.toDuration(DurationUnit.NANOSECONDS))
+        val threadPool7 = ThreadPool7.builder(maxNumWorkers = 5)
+            .minNumWorkers(1)
+            .idleTimeout(1.toDuration(DurationUnit.NANOSECONDS))
+            .build()
         val numTasks = 100
         try {
             for (i in 0 ..< numTasks) {

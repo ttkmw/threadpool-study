@@ -1,3 +1,5 @@
+package draft
+
 import draft.ThreadPool6
 import org.junit.jupiter.api.Test
 

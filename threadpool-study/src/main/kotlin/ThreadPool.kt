@@ -1,6 +1,6 @@
+import com.google.common.base.Preconditions.checkState
+import java.util.concurrent.BlockingQueue
 import java.util.concurrent.Executor
-import java.util.concurrent.LinkedTransferQueue
-import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -14,8 +14,10 @@ import java.util.concurrent.locks.ReentrantLock
 * 태스크a가 실행되지 않는다. - 문제
 *
 * */
-class ThreadPool (private val minNumWorkers: Int, private val maxNumWorkers: Int,
-                             private val idleTimeoutNanos: Long
+class ThreadPool(
+    private val minNumWorkers: Int, private val maxNumWorkers: Int,
+    private val idleTimeoutNanos: Long, private val queue: BlockingQueue<Runnable>,
+    private val submissionHandler: TaskSubmissionHandler
 ) : Executor {
 
 
@@ -39,21 +41,43 @@ class ThreadPool (private val minNumWorkers: Int, private val maxNumWorkers: Int
     private val numBusyWorkers = AtomicInteger()
     private val numWorkers = AtomicInteger()
     var workers = HashSet<Worker>()
-    private val queue = LinkedTransferQueue<Runnable>()
     private val shuttingDown = AtomicBoolean()
     val workersLock = ReentrantLock()
     override fun execute(task: Runnable) {
-        if (shuttingDown.get()) {
-            throw RejectedExecutionException()
+        if (!handleLateSubmission(task)) {
+            return
         }
 
-        queue.add(task)
+        if (!handleSubmission(task)) return
+
         addWorkerIfNecessary()
 
         if (shuttingDown.get()) {
-            queue.remove(task)
-            throw RejectedExecutionException()
+            this.queue.remove(task)
+            val accepted = handleLateSubmission(task)
+            assert(!accepted)
         }
+    }
+
+    private fun handleSubmission(task: Runnable): Boolean {
+        val taskAction = submissionHandler.handleSubmission(task = task, numPendingTasks = queue.size)
+        if (taskAction == TaskActions.ACCEPT) {
+            this.queue.add(task)
+            return true
+        }
+        taskAction.doAction(task)
+        return false
+
+    }
+
+    private fun handleLateSubmission(task: Runnable): Boolean {
+        if (!shuttingDown.get()) {
+            return true
+        }
+        val taskAction = submissionHandler.handleLateSubmission(task)
+        checkState(taskAction != TaskAction.accept(), "Task Action must not be Accept")
+        taskAction.doAction(task)
+        return false
     }
 
     inner class Worker(private val expirationMode: ExpirationMode) {
@@ -74,7 +98,7 @@ class ThreadPool (private val minNumWorkers: Int, private val maxNumWorkers: Int
             try {
                 while (true) {
                     try {
-                        var task = queue.poll()
+                        var task = this@ThreadPool.queue.poll()
                         if (task != null) {
                             if (!isBusy) {
                                 isBusy = true
@@ -90,7 +114,7 @@ class ThreadPool (private val minNumWorkers: Int, private val maxNumWorkers: Int
 
                             when (expirationMode) {
                                 ExpirationMode.NEVER -> {
-                                    task = queue.take()
+                                    task = this@ThreadPool.queue.take()
                                 }
 
                                 ExpirationMode.ON_IDLE -> {
@@ -100,7 +124,7 @@ class ThreadPool (private val minNumWorkers: Int, private val maxNumWorkers: Int
                                         break
                                     }
 
-                                    task = queue.poll(waitTimeoutNanos, TimeUnit.NANOSECONDS)
+                                    task = this@ThreadPool.queue.poll(waitTimeoutNanos, TimeUnit.NANOSECONDS)
                                     if (task == null) {
                                         println("${Thread.currentThread().name} hit by idle timeout")
                                         break
@@ -137,8 +161,8 @@ class ThreadPool (private val minNumWorkers: Int, private val maxNumWorkers: Int
                     numWorkers.decrementAndGet()
                     numBusyWorkers.decrementAndGet() // Was busy handling the 'SHUTDOWN_TASK'
 
-                    if (workers.isEmpty() && queue.isNotEmpty()) {
-                        for (task in queue) {
+                    if (workers.isEmpty() && this@ThreadPool.queue.isNotEmpty()) {
+                        for (task in this@ThreadPool.queue) {
                             if (task != SHUTDOWN_TASK) {
                                 // We found the situation when
                                 // - there are no active threads available and
@@ -233,7 +257,7 @@ class ThreadPool (private val minNumWorkers: Int, private val maxNumWorkers: Int
         if (numBusyWorkers >= numWorkers) {
             // But we shouldn't create more threads than `maxNumThreads`
             if (numBusyWorkers < maxNumWorkers) {
-                return if (idleTimeoutNanos >0 ) ExpirationMode.ON_IDLE else ExpirationMode.NEVER
+                return if (idleTimeoutNanos > 0) ExpirationMode.ON_IDLE else ExpirationMode.NEVER
             }
         }
 
@@ -245,7 +269,7 @@ class ThreadPool (private val minNumWorkers: Int, private val maxNumWorkers: Int
     fun shutdown() {
         if (shuttingDown.compareAndSet(false, true)) {
             for (i in 0..<maxNumWorkers) {
-                queue.add(SHUTDOWN_TASK)
+                this.queue.add(SHUTDOWN_TASK)
             }
         }
         while (true) {

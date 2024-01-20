@@ -1,10 +1,46 @@
 import org.junit.jupiter.api.Test
+import java.util.concurrent.Callable
 
 import java.util.concurrent.CountDownLatch
 import kotlin.time.DurationUnit
 import kotlin.time.toDuration
 
 class ThreadPoolTest {
+
+    @Test
+    fun customTaskSubmissionHandler() {
+        val taskToReject = Runnable {}
+        val threadPool = ThreadPool.builder(1)
+            .submissionHandler(object: TaskSubmissionHandler {
+                override fun handleSubmission(task: Runnable, numPendingTasks: Int): TaskAction {
+                    return if (task == taskToReject) {
+                        TaskActions.REJECT
+                    } else {
+                        TaskActions.ACCEPT
+                    }
+                }
+
+                override fun handleSubmission(task: Callable<*>, numPendingTasks: Int): TaskAction {
+                    throw UnsupportedOperationException()
+                }
+
+                override fun handleLateSubmission(task: Runnable): TaskAction {
+                    return TaskActions.REJECT
+                }
+
+                override fun handleLateSubmission(task: Callable<*>): TaskAction {
+                    return TaskActions.REJECT
+                }
+            }).build()
+
+        val latch = CountDownLatch(1)
+        threadPool.execute { latch.countDown() }
+        latch.await()
+
+        threadPool.execute(taskToReject)
+
+
+    }
 
     @Test
     fun execute() {

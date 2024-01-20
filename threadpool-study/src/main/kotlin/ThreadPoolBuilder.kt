@@ -1,11 +1,14 @@
 import com.google.common.base.Preconditions.checkArgument
+import java.util.concurrent.BlockingQueue
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.time.Duration
 
 class ThreadPoolBuilder(private val maxNumWorkers: Int) {
     private var minNumWorkers: Int = 0
     private var idleTimeoutNanos: Long = 0
-
+    private var queue: BlockingQueue<Runnable>? = null
+    private var submissionHandler: TaskSubmissionHandler = TaskSubmissionHandler.ofDefault()
     init {
         checkArgument(maxNumWorkers > 0 , "maxNumWorkers: %s (expected: > 0)")
     }
@@ -26,11 +29,24 @@ class ThreadPoolBuilder(private val maxNumWorkers: Int) {
         return idleTimeout(idleTimeout.inWholeNanoseconds, TimeUnit.NANOSECONDS)
     }
 
+    fun queue(queue: BlockingQueue<Runnable>): ThreadPoolBuilder {
+        this.queue = queue
+        return this
+    }
+
+    fun submissionHandler(taskSubmissionHandler: TaskSubmissionHandler): ThreadPoolBuilder {
+        this.submissionHandler = taskSubmissionHandler
+        return this
+    }
+
     fun build(): ThreadPool {
+        val queue = this.queue?: LinkedBlockingQueue()
         return ThreadPool(
             minNumWorkers = minNumWorkers,
             maxNumWorkers = maxNumWorkers,
-            idleTimeoutNanos = idleTimeoutNanos
+            idleTimeoutNanos = idleTimeoutNanos,
+            queue = queue,
+            submissionHandler = submissionHandler
         )
     }
 

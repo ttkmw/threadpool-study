@@ -1,4 +1,4 @@
-import concurrencystudy.ReentrantLockStudy
+import draft.concurrencystudy.ReentrantLockStudy
 import org.junit.jupiter.api.Test
 
 class ReentrantLockStudyTest {

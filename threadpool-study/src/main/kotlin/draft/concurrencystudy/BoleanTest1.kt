@@ -1,4 +1,4 @@
-package concurrencystudy
+package draft.concurrencystudy
 
 import kotlin.concurrent.thread
 

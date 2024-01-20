@@ -1,4 +1,4 @@
-package concurrencystudy
+package draft.concurrencystudy
 
 class SafeCounter {
     // ThreadLocal integer for the count

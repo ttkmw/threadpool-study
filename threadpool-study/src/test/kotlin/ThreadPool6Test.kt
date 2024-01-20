@@ -1,7 +1,6 @@
+import draft.ThreadPool6
 import org.junit.jupiter.api.Test
 
-import org.junit.jupiter.api.Assertions.*
-import java.util.concurrent.CountDownLatch
 import kotlin.time.DurationUnit
 import kotlin.time.toDuration
 

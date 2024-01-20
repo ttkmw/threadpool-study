@@ -1,4 +1,4 @@
-package concurrencystudy
+package draft.concurrencystudy
 
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread

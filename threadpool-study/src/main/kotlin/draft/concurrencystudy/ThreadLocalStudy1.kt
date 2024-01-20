@@ -1,4 +1,4 @@
-package concurrencystudy
+package draft.concurrencystudy
 
 class UnsafeCounter {
     // A single shared counter variable

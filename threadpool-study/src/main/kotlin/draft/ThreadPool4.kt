@@ -1,7 +1,8 @@
+package draft
+
 import java.util.concurrent.Executor
 import java.util.concurrent.LinkedTransferQueue
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.concurrent.thread
 
 class ThreadPool4(numThreads: Int) : Executor {
     private val threads = arrayOfNulls<Thread>(numThreads)

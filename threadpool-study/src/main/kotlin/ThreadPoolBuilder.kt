@@ -9,6 +9,7 @@ class ThreadPoolBuilder(private val maxNumWorkers: Int) {
     private var idleTimeoutNanos: Long = 0
     private var queue: BlockingQueue<Runnable>? = null
     private var submissionHandler: TaskSubmissionHandler = TaskSubmissionHandler.ofDefault()
+    private var exceptionHandler: TaskExceptionHandler = TaskExceptionHandler.ofDefault()
     init {
         checkArgument(maxNumWorkers > 0 , "maxNumWorkers: %s (expected: > 0)")
     }
@@ -34,8 +35,13 @@ class ThreadPoolBuilder(private val maxNumWorkers: Int) {
         return this
     }
 
-    fun submissionHandler(taskSubmissionHandler: TaskSubmissionHandler): ThreadPoolBuilder {
-        this.submissionHandler = taskSubmissionHandler
+    fun submissionHandler(submissionHandler: TaskSubmissionHandler): ThreadPoolBuilder {
+        this.submissionHandler = submissionHandler
+        return this
+    }
+
+    fun exceptionHandler(exceptionHandler: TaskExceptionHandler): ThreadPoolBuilder {
+        this.exceptionHandler = exceptionHandler
         return this
     }
 
@@ -46,7 +52,8 @@ class ThreadPoolBuilder(private val maxNumWorkers: Int) {
             maxNumWorkers = maxNumWorkers,
             idleTimeoutNanos = idleTimeoutNanos,
             queue = queue,
-            submissionHandler = submissionHandler
+            submissionHandler = submissionHandler,
+            exceptionHandler = exceptionHandler
         )
     }
 

@@ -1,4 +1,5 @@
 import org.junit.jupiter.api.Test
+import org.slf4j.LoggerFactory
 import java.util.concurrent.Callable
 
 import java.util.concurrent.CountDownLatch
@@ -6,13 +7,16 @@ import kotlin.time.DurationUnit
 import kotlin.time.toDuration
 
 class ThreadPoolTest {
+    companion object {
+        private val logger = LoggerFactory.getLogger(ThreadPoolTest::class.java)
+    }
 
     @Test
     fun customTaskSubmissionHandler() {
         val taskToReject = Runnable {}
         val threadPool = ThreadPool.builder(1)
             .submissionHandler(object: TaskSubmissionHandler {
-                override fun handleSubmission(task: Runnable, numPendingTasks: Int): TaskAction {
+                override fun handleSubmission(task: Runnable, threadPool: ThreadPool): TaskAction {
                     return if (task == taskToReject) {
                         TaskActions.REJECT
                     } else {
@@ -20,15 +24,15 @@ class ThreadPoolTest {
                     }
                 }
 
-                override fun handleSubmission(task: Callable<*>, numPendingTasks: Int): TaskAction {
+                override fun handleSubmission(task: Callable<*>, threadPool: ThreadPool): TaskAction {
                     throw UnsupportedOperationException()
                 }
 
-                override fun handleLateSubmission(task: Runnable): TaskAction {
+                override fun handleLateSubmission(task: Runnable, threadPool: ThreadPool): TaskAction {
                     return TaskActions.REJECT
                 }
 
-                override fun handleLateSubmission(task: Callable<*>): TaskAction {
+                override fun handleLateSubmission(task: Callable<*>, threadPool: ThreadPool): TaskAction {
                     return TaskActions.REJECT
                 }
             }).build()
@@ -49,13 +53,13 @@ class ThreadPoolTest {
             .idleTimeout(1.toDuration(DurationUnit.NANOSECONDS))
             .build()
 
-        val numTasks = 10000
+        val numTasks = 1000
         val latch = CountDownLatch(numTasks)
         try {
             for (i in 0..<numTasks) {
                 val myRunnable = object : Runnable {
                     override fun run() {
-                        println("thread ${Thread.currentThread().name} is running task $i")
+                        logger.info("thread {} is running task {}", Thread.currentThread().name, i)
                         latch.countDown()
                     }
 

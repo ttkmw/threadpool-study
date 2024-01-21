@@ -7,10 +7,10 @@ interface TaskSubmissionHandler {
             return DefaultTaskSubmissionHandler.INSTANCE
         }
     }
-    fun handleSubmission(task: Runnable, numPendingTasks: Int): TaskAction
-    fun handleSubmission(task: Callable<*>, numPendingTasks: Int): TaskAction
+    fun handleSubmission(task: Runnable, threadPool: ThreadPool): TaskAction
+    fun handleSubmission(task: Callable<*>, threadPool: ThreadPool): TaskAction
 
-    fun handleLateSubmission(task: Runnable): TaskAction
-    fun handleLateSubmission(task: Callable<*>): TaskAction
+    fun handleLateSubmission(task: Runnable, threadPool: ThreadPool): TaskAction
+    fun handleLateSubmission(task: Callable<*>, threadPool: ThreadPool): TaskAction
 
 }

@@ -1,8 +1,10 @@
+import org.slf4j.LoggerFactory
 import java.util.concurrent.Callable
 import java.util.concurrent.RejectedExecutionException
 
 class TaskActions private constructor() {
     companion object {
+        private val logger = LoggerFactory.getLogger(TaskActions::class.java)
         val ACCEPT: TaskAction = object: TaskAction {
             override fun doAction(task: Runnable) {
             }
@@ -31,7 +33,7 @@ class TaskActions private constructor() {
             }
 
             private fun log(task: Any) {
-                println("Rejected task : $task")
+                logger.warn("rejected a task {}", task)
             }
         }
     }

@@ -1,10 +1,12 @@
 import com.google.common.base.Preconditions.checkState
+import org.slf4j.LoggerFactory
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
+import kotlin.math.log
 
 /*
 * 문제점
@@ -17,12 +19,15 @@ import java.util.concurrent.locks.ReentrantLock
 class ThreadPool(
     private val minNumWorkers: Int, private val maxNumWorkers: Int,
     private val idleTimeoutNanos: Long, private val queue: BlockingQueue<Runnable>,
-    private val submissionHandler: TaskSubmissionHandler
+    private val submissionHandler: TaskSubmissionHandler,
+    private val exceptionHandler: TaskExceptionHandler,
 ) : Executor {
 
 
     companion object {
         private val SHUTDOWN_TASK = Runnable { }
+
+        private val logger = LoggerFactory.getLogger(ThreadPool::class.java)
 
         fun of(maxNumWorkers: Int): ThreadPool {
             return builder(maxNumWorkers).build()
@@ -60,7 +65,7 @@ class ThreadPool(
     }
 
     private fun handleSubmission(task: Runnable): Boolean {
-        val taskAction = submissionHandler.handleSubmission(task = task, numPendingTasks = queue.size)
+        val taskAction = submissionHandler.handleSubmission(task = task, threadPool = this)
         if (taskAction == TaskActions.ACCEPT) {
             this.queue.add(task)
             return true
@@ -74,7 +79,7 @@ class ThreadPool(
         if (!shuttingDown.get()) {
             return true
         }
-        val taskAction = submissionHandler.handleLateSubmission(task)
+        val taskAction = submissionHandler.handleLateSubmission(task, this)
         checkState(taskAction != TaskAction.accept(), "Task Action must not be Accept")
         taskAction.doAction(task)
         return false
@@ -92,24 +97,25 @@ class ThreadPool(
         }
 
         private fun work() {
-            println("Started a new worker: ${Thread.currentThread().name}")
+            val threadName = Thread.currentThread().name
+            logger.debug("Started an new thread: {}, (expiration mode: {})", threadName, expirationMode)
+
             var isBusy = true
             var lastRunTimeNanos = System.nanoTime()
             try {
                 while (true) {
+                    var task: Runnable? = null
                     try {
-                        var task = this@ThreadPool.queue.poll()
+                        task = this@ThreadPool.queue.poll()
                         if (task != null) {
                             if (!isBusy) {
                                 isBusy = true
                                 numBusyWorkers.incrementAndGet()
-                                println("${Thread.currentThread().name} busy")
                             }
                         } else {
                             if (isBusy) {
                                 isBusy = false
                                 numBusyWorkers.decrementAndGet()
-                                println("${Thread.currentThread().name} idle")
                             }
 
                             when (expirationMode) {
@@ -120,13 +126,13 @@ class ThreadPool(
                                 ExpirationMode.ON_IDLE -> {
                                     val waitTimeoutNanos = idleTimeoutNanos - (System.nanoTime() - lastRunTimeNanos)
                                     if (waitTimeoutNanos <= 0) {
-                                        println("${Thread.currentThread().name} hit by idle timeout")
+                                        logger.debug("Terminating an idle worker {}", "$threadName hit by idle timeout")
                                         break
                                     }
 
                                     task = this@ThreadPool.queue.poll(waitTimeoutNanos, TimeUnit.NANOSECONDS)
                                     if (task == null) {
-                                        println("${Thread.currentThread().name} hit by idle timeout")
+                                        logger.debug("Terminating an idle worker {}", "$threadName hit by idle timeout")
                                         break
                                     }
                                 }
@@ -134,11 +140,10 @@ class ThreadPool(
 
                             isBusy = true
                             numBusyWorkers.incrementAndGet()
-                            println("${Thread.currentThread().name} busy")
                         }
 
                         if (task == SHUTDOWN_TASK) {
-                            println("${Thread.currentThread().name} received poison pill")
+                            logger.debug("Terminating worker with a posion pill {}", threadName)
                             break
                         } else {
                             try {
@@ -147,10 +152,18 @@ class ThreadPool(
                                 lastRunTimeNanos = System.nanoTime()
                             }
                         }
-                    } catch (t: Throwable) {
-                        if (t !is InterruptedException) {
-                            println("unexpected exception thrown")
-                            t.printStackTrace()
+                    } catch (cause: Throwable) {
+                        if (cause !is InterruptedException) {
+                            if (task != null) {
+                                try {
+                                    exceptionHandler.handleTaskException(task = task, cause = cause, threadPool = this@ThreadPool)
+                                } catch (t2: Throwable) {
+                                    t2.addSuppressed(cause)
+                                    logger.warn("unexpected error occurred from task exception handler:", t2)
+                                }
+                            } else {
+                                logger.warn("unexpected exception:", cause)
+                            }
                         }
                     }
                 }
@@ -176,7 +189,7 @@ class ThreadPool(
                 } finally {
                     workersLock.unlock()
                 }
-                println("shutting down - ${Thread.currentThread().name} + (${expirationMode})")
+                logger.debug("A worker has been terminated {}, (expiration mode: {})", threadName, expirationMode)
             }
         }
 
@@ -223,11 +236,6 @@ class ThreadPool(
         val newWorker = Worker(expirationMode)
         workers.add(newWorker)
         return newWorker
-    }
-
-    private enum class WorkerTerminationReason {
-        IDLE,
-        SHUTDOWN
     }
 
     enum class ExpirationMode {

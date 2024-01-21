@@ -11,8 +11,12 @@ repositories {
 }
 
 dependencies {
+    api(platform("org.slf4j:slf4j-bom:2.1.0-alpha1"))
+    api("org.slf4j:slf4j-api")
     implementation("com.google.guava:guava:33.0.0-jre")
+
     testImplementation(kotlin("test"))
+    testImplementation("org.slf4j:slf4j-simple")
 }
 
 tasks.test {

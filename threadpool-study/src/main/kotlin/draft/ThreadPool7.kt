@@ -1,5 +1,7 @@
 package draft
 
+import com.google.common.base.Preconditions.checkState
+import java.util.concurrent.BlockingQueue
 import java.util.concurrent.Executor
 import java.util.concurrent.LinkedTransferQueue
 import java.util.concurrent.RejectedExecutionException
@@ -11,12 +13,13 @@ import java.util.concurrent.locks.ReentrantLock
 class ThreadPool7 internal constructor(
     private val minNumWorkers: Int,
     private val maxNumWorkers: Int,
-    private val idleTimeoutNanos: Long
+    private val idleTimeoutNanos: Long,
+    private val queue: BlockingQueue<Runnable>,
+    private val taskSubmissionHandler: TaskSubmissionHandler7
 ) : Executor {
     private val workers = HashSet<Worker>()
     private val numWorkers = AtomicInteger()
     private val numBusyWorkers = AtomicInteger()
-    private val queue = LinkedTransferQueue<Runnable>()
     private val started = AtomicBoolean()
     private val shutdown = AtomicBoolean()
     private val workerLock = ReentrantLock()
@@ -56,24 +59,44 @@ class ThreadPool7 internal constructor(
     }
 
     override fun execute(task: Runnable) {
-        if (started.compareAndSet(false, true)) {
-            for (worker in workers) {
-                worker.start()
-            }
-        }
 
-        if (shutdown.get()) {
-            throw RejectedExecutionException()
-        }
 
-        queue.add(task)
+        if (!handleLateSubmission(task)) return
+
+        if (!handleSubmission(task)) return
+
         // queue.add보다 먼저 호출하면 무슨 문제가 생겼는지 까먹음.
         addWorkersIfNecessary()
 
         if (shutdown.get()) {
             queue.remove(task)
-            throw RejectedExecutionException()
+            val accepted = handleLateSubmission(task)
+            assert(!accepted)
         }
+    }
+
+    private fun handleSubmission(task: Runnable): Boolean {
+        val taskAction = taskSubmissionHandler.handleSubmission(task = task, numPendingTasks = queue.size)
+        if (taskAction == TaskAction7.accept()) {
+            queue.add(task)
+            return true
+        }
+
+        taskAction.doAction(task)
+        return false
+    }
+
+    private fun handleLateSubmission(task: Runnable): Boolean {
+        if (!shutdown.get()) {
+            return true
+        }
+        val taskAction = taskSubmissionHandler.handleLateSubmission(task = task)
+        checkState(
+            taskAction != TaskAction.accept(),
+            "taskSubmissionHandler.handleLateSubmission must not accept a task"
+        )
+        taskAction.doAction(task)
+        return false
     }
 
     private fun addWorkersIfNecessary() {

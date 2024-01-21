@@ -1,6 +1,9 @@
 package draft
 
 import com.google.common.base.Preconditions.checkArgument
+import java.util.concurrent.BlockingQueue
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.LinkedTransferQueue
 import java.util.concurrent.TimeUnit
 import kotlin.time.Duration
 import kotlin.time.DurationUnit
@@ -9,6 +12,8 @@ import kotlin.time.toDuration
 class ThreadPoolBuilder7(private val maxNumWorkers: Int) {
     private var minNumWorkers: Int = 0
     private var idleTimeoutNanos: Long = 0.toDuration(DurationUnit.NANOSECONDS).inWholeNanoseconds
+    private var queue: BlockingQueue<Runnable>? = null
+    private var taskSubmissionHandler: TaskSubmissionHandler7 = TaskSubmissionHandler7.ofDefault()
 
     init {
         checkArgument(maxNumWorkers > 0, "maxNumWorkers: $maxNumWorkers, expected > 0")
@@ -30,11 +35,24 @@ class ThreadPoolBuilder7(private val maxNumWorkers: Int) {
         return idleTimeout(idleTimeout.inWholeNanoseconds, TimeUnit.NANOSECONDS)
     }
 
+    fun queue(queue: BlockingQueue<Runnable>): ThreadPoolBuilder7 {
+        this.queue = queue
+        return this
+    }
+
+    fun taskSubmissionHandler(taskSubmissionHandler7: TaskSubmissionHandler7): ThreadPoolBuilder7 {
+        this.taskSubmissionHandler = taskSubmissionHandler7
+        return this
+    }
+
     fun build(): ThreadPool7 {
+        val queue = queue?: LinkedBlockingQueue()
         return ThreadPool7(
             minNumWorkers = minNumWorkers,
             maxNumWorkers = maxNumWorkers,
-            idleTimeoutNanos = idleTimeoutNanos
+            idleTimeoutNanos = idleTimeoutNanos,
+            queue = queue,
+            taskSubmissionHandler = taskSubmissionHandler
         )
     }
 }

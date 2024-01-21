@@ -5,7 +5,7 @@ enum class DefaultTaskExceptionHandler: TaskExceptionHandler {
     INSTANCE;
 
     companion object {
-        private val Logger = LoggerFactory.getLogger(DefaultTaskSubmissionHandler::class.java)
+        private val logger = LoggerFactory.getLogger(DefaultTaskSubmissionHandler::class.java)
     }
     override fun handleTaskException(task: Runnable, cause: Throwable, threadPool: ThreadPool) {
         log(cause)
@@ -16,6 +16,6 @@ enum class DefaultTaskExceptionHandler: TaskExceptionHandler {
     }
 
     private fun log(cause: Throwable) {
-        Logger.warn("unexpected exception occurred while running a task:", cause)
+        logger.warn("unexpected exception occurred while running a task:", cause)
     }
 }

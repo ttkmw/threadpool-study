@@ -1,10 +1,9 @@
 package draft
 
 import com.google.common.base.Preconditions.checkState
+import org.slf4j.LoggerFactory
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.Executor
-import java.util.concurrent.LinkedTransferQueue
-import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -15,17 +14,19 @@ class ThreadPool7 internal constructor(
     private val maxNumWorkers: Int,
     private val idleTimeoutNanos: Long,
     private val queue: BlockingQueue<Runnable>,
-    private val taskSubmissionHandler: TaskSubmissionHandler7
+    private val submissionHandler: TaskSubmissionHandler7,
+    private val exceptionHandler: TaskExceptionHandler7,
 ) : Executor {
     private val workers = HashSet<Worker>()
     private val numWorkers = AtomicInteger()
     private val numBusyWorkers = AtomicInteger()
-    private val started = AtomicBoolean()
     private val shutdown = AtomicBoolean()
     private val workerLock = ReentrantLock()
 
     companion object {
         private val SHUTDOWN_TASK = Runnable { }
+
+        private val logger = LoggerFactory.getLogger(ThreadPool7::class.java)
 
         fun of(maxNumWorkers: Int): ThreadPool7 {
             return builder(maxNumWorkers = maxNumWorkers)
@@ -76,7 +77,7 @@ class ThreadPool7 internal constructor(
     }
 
     private fun handleSubmission(task: Runnable): Boolean {
-        val taskAction = taskSubmissionHandler.handleSubmission(task = task, numPendingTasks = queue.size)
+        val taskAction = submissionHandler.handleSubmission(task = task, numPendingTasks = queue.size)
         if (taskAction == TaskAction7.accept()) {
             queue.add(task)
             return true
@@ -90,7 +91,7 @@ class ThreadPool7 internal constructor(
         if (!shutdown.get()) {
             return true
         }
-        val taskAction = taskSubmissionHandler.handleLateSubmission(task = task)
+        val taskAction = submissionHandler.handleLateSubmission(task = task)
         checkState(
             taskAction != TaskAction.accept(),
             "taskSubmissionHandler.handleLateSubmission must not accept a task"
@@ -174,8 +175,9 @@ class ThreadPool7 internal constructor(
             var lastRuntimeNanos = System.nanoTime()
             try {
                 while (true) {
+                    var task: Runnable? = null
                     try {
-                        var task = queue.poll()
+                        task = queue.poll()
                         if (task == null) {
                             if (isBusy) {
                                 isBusy = false
@@ -215,9 +217,18 @@ class ThreadPool7 internal constructor(
                         }
 
                     } catch (t: Throwable) {
-                        if (t !is InterruptedException) {
-                            println("unexpected error occurred")
-                            t.printStackTrace()
+                        if (task != null) {
+                            try {
+                                exceptionHandler.handleException(
+                                    task = task,
+                                    cause = t
+                                )
+                            } catch (t2: Throwable) {
+                                t2.addSuppressed(t)
+                                logger.warn("unexpected error occurred at task exception handler", t2)
+                            }
+                        } else {
+                            logger.warn("unexpected error occurred", t)
                         }
                     }
                 }

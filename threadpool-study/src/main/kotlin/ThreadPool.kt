@@ -3,10 +3,9 @@ import org.slf4j.LoggerFactory
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
-import kotlin.math.log
 
 /*
 * 문제점
@@ -17,8 +16,10 @@ import kotlin.math.log
 *
 * */
 class ThreadPool(
-    private val minNumWorkers: Int, private val maxNumWorkers: Int,
-    private val idleTimeoutNanos: Long, private val queue: BlockingQueue<Runnable>,
+    private val minNumWorkers: Int,
+    private val maxNumWorkers: Int,
+    private val idleTimeoutNanos: Long,
+    private val queue: BlockingQueue<Runnable>,
     private val submissionHandler: TaskSubmissionHandler,
     private val exceptionHandler: TaskExceptionHandler,
 ) : Executor {
@@ -46,7 +47,7 @@ class ThreadPool(
     private val numBusyWorkers = AtomicInteger()
     private val numWorkers = AtomicInteger()
     var workers = HashSet<Worker>()
-    private val shuttingDown = AtomicBoolean()
+    private val shutdownState = AtomicReference(ShutdownState.NOT_SHUTDOWN)
     val workersLock = ReentrantLock()
     override fun execute(task: Runnable) {
         if (!handleLateSubmission(task)) {
@@ -57,12 +58,14 @@ class ThreadPool(
 
         addWorkerIfNecessary()
 
-        if (shuttingDown.get()) {
+        if (isShutdown()) {
             this.queue.remove(task)
             val accepted = handleLateSubmission(task)
             assert(!accepted)
         }
     }
+
+
 
     private fun handleSubmission(task: Runnable): Boolean {
         val taskAction = submissionHandler.handleSubmission(task = task, threadPool = this)
@@ -76,7 +79,7 @@ class ThreadPool(
     }
 
     private fun handleLateSubmission(task: Runnable): Boolean {
-        if (!shuttingDown.get()) {
+        if (!isShutdown()) {
             return true
         }
         val taskAction = submissionHandler.handleLateSubmission(task, this)
@@ -104,8 +107,13 @@ class ThreadPool(
             var lastRunTimeNanos = System.nanoTime()
             try {
                 while (true) {
+
                     var task: Runnable? = null
                     try {
+                        if (Thread.interrupted() && shutdownState.get() == ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT) {
+                            logger.debug("Terminating a worker by an interrupt {}", threadName)
+                            break
+                        }
                         task = this@ThreadPool.queue.poll()
                         if (task != null) {
                             if (!isBusy) {
@@ -147,23 +155,34 @@ class ThreadPool(
                             break
                         } else {
                             try {
+                                if (Thread.interrupted()) {
+                                    throw InterruptedException()
+                                }
                                 task.run()
                             } finally {
                                 lastRunTimeNanos = System.nanoTime()
                             }
                         }
+                    }
+                    catch (cause: InterruptedException) {
+                        if (shutdownState.get() == ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT) {
+                            logger.debug("Terminating a worker by an interrupt {}", threadName)
+                            break
+                        } else if (logger.isTraceEnabled) {
+                          logger.trace("Ignoring an interrupt that is not triggered by shutdownNow()", cause)
+                        } else {
+                            logger.debug("Ignoring an interrupt that is not triggered by shutdownNow()")
+                        }
                     } catch (cause: Throwable) {
-                        if (cause !is InterruptedException) {
-                            if (task != null) {
-                                try {
-                                    exceptionHandler.handleTaskException(task = task, cause = cause, threadPool = this@ThreadPool)
-                                } catch (t2: Throwable) {
-                                    t2.addSuppressed(cause)
-                                    logger.warn("unexpected error occurred from task exception handler:", t2)
-                                }
-                            } else {
-                                logger.warn("unexpected exception:", cause)
+                        if (task != null) {
+                            try {
+                                exceptionHandler.handleTaskException(task = task, cause = cause, threadPool = this@ThreadPool)
+                            } catch (t2: Throwable) {
+                                t2.addSuppressed(cause)
+                                logger.warn("unexpected error occurred from task exception handler:", t2)
                             }
+                        } else {
+                            logger.warn("unexpected exception:", cause)
                         }
                     }
                 }
@@ -174,7 +193,7 @@ class ThreadPool(
                     numWorkers.decrementAndGet()
                     numBusyWorkers.decrementAndGet() // Was busy handling the 'SHUTDOWN_TASK'
 
-                    if (workers.isEmpty() && this@ThreadPool.queue.isNotEmpty()) {
+                    if (workers.isEmpty() && this@ThreadPool.queue.isNotEmpty() && shutdownState.get() != ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT) {
                         for (task in this@ThreadPool.queue) {
                             if (task != SHUTDOWN_TASK) {
                                 // We found the situation when
@@ -202,6 +221,10 @@ class ThreadPool(
                 }
             }
         }
+
+        fun interrupt() {
+            thread.interrupt()
+        }
     }
 
     private fun addWorkerIfNecessary() {
@@ -211,7 +234,7 @@ class ThreadPool(
             // try, finally를 newThread에만 걸어도 되는건지, needsMoreThreads까지 포함해야하는건지 궁금.
             try {
 
-                while (!shuttingDown.get()) {
+                while (!isShutdown()) {
                     val expirationMode = needsMoreWorker()
                     if (expirationMode != null) {
                         if (newWorkers == null) {
@@ -250,6 +273,14 @@ class ThreadPool(
         ON_IDLE
     }
 
+    enum class ShutdownState {
+        NOT_SHUTDOWN,
+        SHUTTING_DOWN_WITHOUT_INTERRUPT,
+        SHUTTING_DOWN_WITH_INTERRUPT,
+        SHUTDOWN
+
+    }
+
     /**
      * Returns the worker type if more worker is needed to handle newly submitted task.
      * {@code null} is returned if no worker is needed
@@ -274,12 +305,52 @@ class ThreadPool(
 
     }
 
+    fun isShutdown() = shutdownState.get() != ShutdownState.NOT_SHUTDOWN
     fun shutdown() {
-        if (shuttingDown.compareAndSet(false, true)) {
-            for (i in 0..<maxNumWorkers) {
-                this.queue.add(SHUTDOWN_TASK)
+        doShutdown(false)
+    }
+
+    fun shutdownNow(): List<*> {
+        doShutdown(true)
+        val unprocessedTasks: MutableList<Runnable> = ArrayList(queue.size)
+        while (true) {
+            val task = queue.poll() ?: break
+
+            if (task != SHUTDOWN_TASK) {
+                unprocessedTasks.add(task)
             }
         }
+        if (queue.isNotEmpty()) {
+            for (task in queue.toTypedArray()) {
+                if (task != SHUTDOWN_TASK && !unprocessedTasks.contains(task)) {
+                    unprocessedTasks.add(task)
+                }
+            }
+        }
+        return unprocessedTasks
+    }
+
+    private fun doShutdown(interrupt: Boolean) {
+        var needsShutdownTasks = false
+        if (interrupt) {
+            if (shutdownState.compareAndSet(ShutdownState.NOT_SHUTDOWN, ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT)) {
+                needsShutdownTasks = true
+            } else {
+                shutdownState.compareAndSet(ShutdownState.SHUTTING_DOWN_WITHOUT_INTERRUPT, ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT)
+                logger.debug("shutdownNow() is called while shutdown() is in progress")
+            }
+        } else {
+            if (shutdownState.compareAndSet(ShutdownState.NOT_SHUTDOWN, ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT)) {
+                needsShutdownTasks = true
+            }
+        }
+
+        if (needsShutdownTasks) {
+            for (i in 0 ..< maxNumWorkers) {
+                queue.add(SHUTDOWN_TASK)
+            }
+        }
+
         while (true) {
             val workers = arrayOfNulls<Worker>(this.workers.size)
             workersLock.lock()
@@ -293,15 +364,24 @@ class ThreadPool(
                 break
             }
 
+            if (interrupt) {
+                for (w in workers) {
+                    if (w == null) {
+                        continue
+                    }
+                    w.interrupt()
+                }
+            }
 
             for (worker in workers) {
-
                 if (worker == null) {
                     continue
                 }
                 worker.join()
             }
         }
+
+        shutdownState.set(ShutdownState.SHUTDOWN)
     }
 
 

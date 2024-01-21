@@ -221,7 +221,8 @@ class ThreadPool7 internal constructor(
                             try {
                                 exceptionHandler.handleException(
                                     task = task,
-                                    cause = t
+                                    cause = t,
+                                    threadPool = this@ThreadPool7
                                 )
                             } catch (t2: Throwable) {
                                 t2.addSuppressed(t)

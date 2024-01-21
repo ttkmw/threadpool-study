@@ -10,7 +10,7 @@ interface TaskExceptionHandler7 {
             return DefaultTaskExceptionHandler7.INSTANCE
         }
     }
-    fun handleException(task: Runnable, cause: Throwable, threadPool: ThreadPool)
+    fun handleException(task: Runnable, cause: Throwable, threadPool: ThreadPool7)
 
-    fun handleException(task: Callable<*>, cause: Throwable, threadPool: ThreadPool)
+    fun handleException(task: Callable<*>, cause: Throwable, threadPool: ThreadPool7)
 }

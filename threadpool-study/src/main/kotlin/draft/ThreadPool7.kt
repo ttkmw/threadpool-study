@@ -5,8 +5,8 @@ import org.slf4j.LoggerFactory
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
 class ThreadPool7 internal constructor(
@@ -20,7 +20,7 @@ class ThreadPool7 internal constructor(
     private val workers = HashSet<Worker>()
     private val numWorkers = AtomicInteger()
     private val numBusyWorkers = AtomicInteger()
-    private val shutdown = AtomicBoolean()
+    private val shutdownState = AtomicReference(ShutdownState.NOT_SHUTDOWN)
     private val workerLock = ReentrantLock()
 
     companion object {
@@ -69,12 +69,14 @@ class ThreadPool7 internal constructor(
         // queue.add보다 먼저 호출하면 무슨 문제가 생겼는지 까먹음.
         addWorkersIfNecessary()
 
-        if (shutdown.get()) {
+        if (isShutdown()) {
             queue.remove(task)
             val accepted = handleLateSubmission(task)
             assert(!accepted)
         }
     }
+
+
 
     private fun handleSubmission(task: Runnable): Boolean {
         val taskAction = submissionHandler.handleSubmission(task = task, numPendingTasks = queue.size)
@@ -88,7 +90,7 @@ class ThreadPool7 internal constructor(
     }
 
     private fun handleLateSubmission(task: Runnable): Boolean {
-        if (!shutdown.get()) {
+        if (!isShutdown()) {
             return true
         }
         val taskAction = submissionHandler.handleLateSubmission(task = task)
@@ -105,7 +107,7 @@ class ThreadPool7 internal constructor(
             workerLock.lock()
             var newWorkers: MutableList<Worker>? = null
             try {
-                while (!shutdown.get()) {
+                while (!isShutdown()) {
                     val workerType = needsMoreWorker() ?: break
                     if (newWorkers == null) {
                         newWorkers = mutableListOf()
@@ -134,8 +136,48 @@ class ThreadPool7 internal constructor(
         return null
     }
 
+    private fun isShutdown() = shutdownState.get() != ShutdownState.NOT_SHUTDOWN
+
     fun shutdown() {
-        if (shutdown.compareAndSet(false, true)) {
+        doShutdown(false)
+    }
+
+    fun shutdownNow(): List<*> {
+        doShutdown(true)
+        val unprocessed = ArrayList<Runnable>(queue.size)
+        while (true) {
+            val task = queue.poll() ?: break
+            if (task != SHUTDOWN_TASK) {
+                unprocessed.add(task)
+            }
+        }
+
+        if (queue.isNotEmpty()) {
+            for (task in queue.toTypedArray()) {
+                if (task != SHUTDOWN_TASK && !unprocessed.contains(task)) {
+                    unprocessed.add(task)
+                }
+            }
+        }
+        return unprocessed
+    }
+
+    private fun doShutdown(interrupt: Boolean) {
+        var needsShutdownTasks = false
+        if (interrupt) {
+            if (shutdownState.compareAndSet(ShutdownState.NOT_SHUTDOWN, ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT)) {
+                needsShutdownTasks = true
+            } else {
+                shutdownState.compareAndSet(ShutdownState.SHUTTING_DOWN_WITHOUT_INTERRUPT, ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT)
+                // 여기 로거?
+            }
+        } else {
+            if (shutdownState.compareAndSet(ShutdownState.NOT_SHUTDOWN, ShutdownState.SHUTTING_DOWN_WITHOUT_INTERRUPT)) {
+                needsShutdownTasks = true
+            }
+        }
+
+        if (needsShutdownTasks) {
             for (worker in workers) {
                 queue.add(SHUTDOWN_TASK)
             }
@@ -156,10 +198,18 @@ class ThreadPool7 internal constructor(
                 break
             }
 
+            if (interrupt) {
+                for (w in workers) {
+                    w.interrupt()
+                }
+            }
+
             for (worker in workers) {
                 worker.join()
             }
         }
+
+        shutdownState.set(ShutdownState.SHUTDOWN)
     }
 
     enum class ExpirationMode {
@@ -167,11 +217,19 @@ class ThreadPool7 internal constructor(
         ON_IDLE
     }
 
+    enum class ShutdownState {
+        NOT_SHUTDOWN,
+        SHUTTING_DOWN_WITHOUT_INTERRUPT,
+        SHUTTING_DOWN_WITH_INTERRUPT,
+        SHUTDOWN
+    }
+
     inner class Worker(private val EXPIRATIONMODE: ExpirationMode) {
         private val thread = Thread(this::work)
 
         private fun work() {
             var isBusy = true
+            val threadName = Thread.currentThread().name
             var lastRuntimeNanos = System.nanoTime()
             try {
                 while (true) {
@@ -193,7 +251,7 @@ class ThreadPool7 internal constructor(
                                     val waitTimeNanos = idleTimeoutNanos - (System.nanoTime() - lastRuntimeNanos)
                                     task = queue.poll(waitTimeNanos, TimeUnit.NANOSECONDS)
                                     if (waitTimeNanos <= 0 || task == null) {
-                                        println("${Thread.currentThread().name} is timed out")
+                                        logger.warn("Terminating $threadName because it is idle")
                                         break
                                     }
                                 }
@@ -209,13 +267,22 @@ class ThreadPool7 internal constructor(
                         }
 
                         if (task == SHUTDOWN_TASK) {
-                            println("${Thread.currentThread().name} is received poison kill")
+                            logger.warn("Terminating $threadName because it received poison pill")
                             break
                         } else {
                             task.run()
                             lastRuntimeNanos = System.nanoTime()
                         }
 
+                    } catch (t: InterruptedException) {
+                        if (shutdownState.get() == ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT) {
+                            logger.warn("Terminating $threadName because it is interrupted")
+                            break
+                        } else if (logger.isTraceEnabled) {
+                            logger.trace("Ignoring an interrupt that is not triggered by shutdownNow()", t)
+                        } else {
+                            logger.debug("Ignoring an interrupt that is not triggered by shutdownNow()")
+                        }
                     } catch (t: Throwable) {
                         if (task != null) {
                             try {
@@ -255,7 +322,7 @@ class ThreadPool7 internal constructor(
                     workerLock.unlock()
                 }
 
-                println("${Thread.currentThread().name} ($EXPIRATIONMODE) is shutting down")
+                logger.warn("$threadName is terminated")
             }
         }
 
@@ -271,6 +338,10 @@ class ThreadPool7 internal constructor(
                 }
                 //여기서 while을 붙인건 interrupt될까봐 그런거였나?
             } while (thread.isAlive)
+        }
+
+        fun interrupt() {
+            thread.interrupt()
         }
     }
 }

@@ -11,11 +11,11 @@ enum class DefaultTaskExceptionHandler7 : TaskExceptionHandler7 {
         private val logger = LoggerFactory.getLogger(DefaultTaskSubmissionHandler7::class.java)
     }
 
-    override fun handleException(task: Runnable, cause: Throwable, threadPool: ThreadPool) {
+    override fun handleException(task: Runnable, cause: Throwable, threadPool: ThreadPool7) {
         log(task.toString(), cause)
     }
 
-    override fun handleException(task: Callable<*>, cause: Throwable, threadPool: ThreadPool) {
+    override fun handleException(task: Callable<*>, cause: Throwable, threadPool: ThreadPool7) {
         log(task.toString(), cause)
     }
 

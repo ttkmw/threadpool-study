@@ -30,6 +30,8 @@ class ThreadPool(
 
         private val logger = LoggerFactory.getLogger(ThreadPool::class.java)
 
+        private val TASK_NOT_STARTED_MARKER = (0).toLong()
+
         fun of(maxNumWorkers: Int): ThreadPool {
             return builder(maxNumWorkers).build()
         }
@@ -88,18 +90,72 @@ class ThreadPool(
         return false
     }
 
-    inner class Worker(private val expirationMode: ExpirationMode) {
+    abstract inner class AbstractWorker {
         private val thread: Thread
 
-        init {
-            thread = Thread(this::work)
-        }
+        @Volatile
+        private var interruptReason: InterruptReason? = null
 
+        init {
+            thread = Thread(::work)
+        }
         fun start() {
             thread.start()
         }
 
-        private fun work() {
+        fun join() {
+            while (thread.isAlive) {
+                try {
+                    thread.join()
+                } catch (_: InterruptedException) {
+
+                }
+            }
+        }
+
+        fun interrupt(reason: InterruptReason) {
+            interruptReason = reason
+            thread.interrupt()
+        }
+
+        fun interrupted(): InterruptReason? {
+            val interrupted = Thread.interrupted()
+            val interruptReason = this.interruptReason
+            this.interruptReason = null
+            return if (interrupted) {
+                return interruptReason
+            } else null
+        }
+
+        abstract fun work()
+        fun clearInterrupt() {
+            interruptReason = null
+            Thread.interrupted()
+        }
+    }
+
+    inner class Watchdog: AbstractWorker() {
+        override fun work() {
+            Thread.sleep(1000)
+            while (!isShutdown()) {
+                for (w in workers) {
+                    val taskStartTimeNanos = w.taskStartTimeNanos()
+                    if (taskStartTimeNanos == TASK_NOT_STARTED_MARKER) {
+                        continue
+                    }
+                    if (System.nanoTime() - taskStartTimeNanos > TimeUnit.MINUTES.toNanos(1)) {
+                        w.interrupt(InterruptReason.WATCHDOG)
+                    }
+                }
+            }
+        }
+    }
+
+    inner class Worker(private val expirationMode: ExpirationMode): AbstractWorker() {
+        @Volatile
+        private var taskStartTimeNanos: Long = TASK_NOT_STARTED_MARKER
+
+        override fun work() {
             val threadName = Thread.currentThread().name
             logger.debug("Started an new thread: {}, (expiration mode: {})", threadName, expirationMode)
 
@@ -110,7 +166,8 @@ class ThreadPool(
 
                     var task: Runnable? = null
                     try {
-                        if (Thread.interrupted() && shutdownState.get() == ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT) {
+                        clearInterrupt()
+                        if (shutdownState.get() == ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT) {
                             logger.debug("Terminating a worker by an interrupt {}", threadName)
                             break
                         }
@@ -155,11 +212,10 @@ class ThreadPool(
                             break
                         } else {
                             try {
-                                if (Thread.interrupted()) {
-                                    throw InterruptedException()
-                                }
+                                setTaskStartTimeNanos()
                                 task.run()
                             } finally {
+                                clearTaskStartTimeNanos()
                                 lastRunTimeNanos = System.nanoTime()
                             }
                         }
@@ -212,18 +268,23 @@ class ThreadPool(
             }
         }
 
-        fun join() {
-            while (thread.isAlive) {
-                try {
-                    thread.join()
-                } catch (_: InterruptedException) {
-
-                }
+        private fun setTaskStartTimeNanos() {
+            val nanoTime = System.nanoTime()
+            taskStartTimeNanos = if (nanoTime == TASK_NOT_STARTED_MARKER) 1 else nanoTime
+            val interruptedReason = interrupted()
+            if (interruptedReason == InterruptReason.SHUTDOWN) {
+                interrupt(InterruptReason.SHUTDOWN)
+            } else {
+                assert(interruptedReason == null || interruptedReason == InterruptReason.WATCHDOG)
             }
         }
 
-        fun interrupt() {
-            thread.interrupt()
+        private fun clearTaskStartTimeNanos() {
+            taskStartTimeNanos = TASK_NOT_STARTED_MARKER
+        }
+
+        fun taskStartTimeNanos(): Long {
+            return taskStartTimeNanos
         }
     }
 
@@ -278,7 +339,11 @@ class ThreadPool(
         SHUTTING_DOWN_WITHOUT_INTERRUPT,
         SHUTTING_DOWN_WITH_INTERRUPT,
         SHUTDOWN
+    }
 
+    enum class InterruptReason {
+        SHUTDOWN,
+        WATCHDOG
     }
 
     /**
@@ -369,7 +434,7 @@ class ThreadPool(
                     if (w == null) {
                         continue
                     }
-                    w.interrupt()
+                    w.interrupt(InterruptReason.SHUTDOWN)
                 }
             }
 

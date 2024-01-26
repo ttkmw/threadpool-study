@@ -13,13 +13,12 @@ class ThreadPool8Test {
 
     @Test
     fun execute() {
-        val threadPool8 = ThreadPool8(2)
-        val numTasks = 10
+        val threadPool8 = ThreadPool8(10)
+        val numTasks = 100
         try {
             for (i in 0 ..< numTasks) {
                 threadPool8.execute {
                     logger.debug("${Thread.currentThread().name} is running task: $i")
-                    Thread.sleep(50)
                 }
             }
         } finally {

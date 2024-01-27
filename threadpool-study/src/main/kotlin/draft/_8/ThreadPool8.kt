@@ -1,16 +1,15 @@
 package draft._8
 
+import TaskAction
 import org.slf4j.LoggerFactory
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.Executor
-import java.util.concurrent.LinkedTransferQueue
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 
-// submittedHandler
 // exceptionHandler
 // shutdownNow
 // watchdog
@@ -19,7 +18,8 @@ class ThreadPool8(
     private val minNumWorkers: Int,
     private val maxNumWorkers: Int,
     private val idleTimeoutNanos: Long,
-    private val queue: BlockingQueue<Runnable>
+    private val queue: BlockingQueue<Runnable>,
+    private val submissionHandler: TaskSubmissionHandler8
 ) : Executor {
     val workers = HashSet<Worker>()
 
@@ -59,16 +59,37 @@ class ThreadPool8(
     }
 
     override fun execute(task: Runnable) {
-        if (shutdown.get()) {
-            throw RejectedExecutionException()
-        }
-        queue.add(task)
+        if (!handleLateSubmission(task)) return
+
+        if (!handleSubmission(task)) return
+
         addWorkersIfNecessary()
 
         if (shutdown.get()) {
             queue.remove(task)
-            throw RejectedExecutionException()
+            val accepted = handleLateSubmission(task)
+            assert(!accepted)
         }
+    }
+
+    private fun handleSubmission(task: Runnable): Boolean {
+        val taskAction = submissionHandler.handleSubmission(task = task, threadPool = this)
+        if (taskAction == TaskAction8.accept()) {
+            queue.add(task)
+            return true
+        }
+        taskAction.doAction(task)
+        return false
+    }
+
+    private fun handleLateSubmission(task: Runnable): Boolean {
+        if (!shutdown.get()) {
+            return true
+        }
+        val taskAction = submissionHandler.handleLateSubmission(task, this)
+        assert(taskAction != TaskAction.accept()) { "task Action cannot be accept" }
+        taskAction.doAction(task)
+        return false
     }
 
     private fun addWorkersIfNecessary() {

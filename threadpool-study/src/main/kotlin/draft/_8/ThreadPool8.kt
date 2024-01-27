@@ -1,6 +1,7 @@
 package draft._8
 
 import org.slf4j.LoggerFactory
+import java.util.concurrent.BlockingQueue
 import java.util.concurrent.Executor
 import java.util.concurrent.LinkedTransferQueue
 import java.util.concurrent.RejectedExecutionException
@@ -9,15 +10,18 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 
-// builder
 // submittedHandler
 // exceptionHandler
 // shutdownNow
 // watchdog
 // executorService
-class ThreadPool8(private val minNumWorkers: Int, private val maxNumWorkers: Int, private val idleTimeoutNanos: Long) : Executor{
+class ThreadPool8(
+    private val minNumWorkers: Int,
+    private val maxNumWorkers: Int,
+    private val idleTimeoutNanos: Long,
+    private val queue: BlockingQueue<Runnable>
+) : Executor {
     val workers = HashSet<Worker>()
-    val queue = LinkedTransferQueue<Runnable>()
 
     private val numWorkers = AtomicInteger()
     private val numBusyWorkers = AtomicInteger()
@@ -27,7 +31,7 @@ class ThreadPool8(private val minNumWorkers: Int, private val maxNumWorkers: Int
 
     companion object {
         private val logger = LoggerFactory.getLogger(ThreadPool8::class.java)
-        private val SHUTDOWN_TASK = Runnable {  }
+        private val SHUTDOWN_TASK = Runnable { }
 
         fun of(maxNumWorkers: Int): ThreadPool8 {
             return builder(maxNumWorkers).build()
@@ -103,7 +107,7 @@ class ThreadPool8(private val minNumWorkers: Int, private val maxNumWorkers: Int
     fun shutdown() {
         logger.debug("shutdown thread pool is started")
         if (shutdown.compareAndSet(false, true)) {
-            for (i in 0 ..< maxNumWorkers) {
+            for (i in 0..<maxNumWorkers) {
                 queue.add(SHUTDOWN_TASK)
             }
         }
@@ -156,14 +160,22 @@ class ThreadPool8(private val minNumWorkers: Int, private val maxNumWorkers: Int
                                     isBusy = true
                                     numBusyWorkers.incrementAndGet()
                                 }
+
                                 ExpirationMode.ON_IDLE_TIMOUT -> {
                                     if (waitTimeNanos < 0) {
-                                        logger.debug("{} stops doing work because {} haven't work too long time", threadName, threadName)
+                                        logger.debug(
+                                            "{} stops doing work because {} haven't work too long time",
+                                            threadName,
+                                            threadName
+                                        )
                                         break
                                     }
                                     task = queue.poll(waitTimeNanos, TimeUnit.NANOSECONDS)
                                     if (task == null) {
-                                        logger.debug("{} stops doing work because there is no work for some time", threadName)
+                                        logger.debug(
+                                            "{} stops doing work because there is no work for some time",
+                                            threadName
+                                        )
                                         break
                                     }
                                     isBusy = true
@@ -180,7 +192,11 @@ class ThreadPool8(private val minNumWorkers: Int, private val maxNumWorkers: Int
                         }
 
                         if (task == SHUTDOWN_TASK) {
-                            logger.debug("{} received a command that 'do not work'. {} stops doing work", threadName, threadName)
+                            logger.debug(
+                                "{} received a command that 'do not work'. {} stops doing work",
+                                threadName,
+                                threadName
+                            )
                             break
                         } else {
                             task.run()
@@ -217,7 +233,8 @@ class ThreadPool8(private val minNumWorkers: Int, private val maxNumWorkers: Int
             do {
                 try {
                     thread.join()
-                } catch (_: InterruptedException) {}
+                } catch (_: InterruptedException) {
+                }
                 // q: 얠 붙였던건 interrupt 될수도 있으니까 맞나
             } while (thread.isAlive)
         }

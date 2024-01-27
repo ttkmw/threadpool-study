@@ -1,6 +1,8 @@
 package draft._8
 
 import com.google.common.base.Preconditions.checkArgument
+import java.util.concurrent.BlockingQueue
+import java.util.concurrent.LinkedTransferQueue
 import java.util.concurrent.TimeUnit
 import kotlin.time.Duration
 
@@ -8,6 +10,7 @@ class ThreadPoolBuilder8(maxNumWorkers: Int) {
     private val maxNumWorkers: Int
     private var minNumWorkers: Int = 0
     private var idleTimeoutNanos: Long = 0
+    private var queue: BlockingQueue<Runnable>? = null
 
     init {
         checkArgument(maxNumWorkers > 0, "maxNumWorkers: %s (expected > 0)")
@@ -31,11 +34,18 @@ class ThreadPoolBuilder8(maxNumWorkers: Int) {
         return idleTimeout(idleTimeout.inWholeNanoseconds, TimeUnit.NANOSECONDS)
     }
 
+    fun queue(queue: BlockingQueue<Runnable>): ThreadPoolBuilder8 {
+        this.queue = queue
+        return this
+    }
+
     fun build(): ThreadPool8 {
+        val queue = this.queue ?: LinkedTransferQueue() // q: 이거 왜 LinkedBlockingQueue 썼었지?
         return ThreadPool8(
             minNumWorkers = minNumWorkers,
             maxNumWorkers = maxNumWorkers,
-            idleTimeoutNanos = idleTimeoutNanos
+            idleTimeoutNanos = idleTimeoutNanos,
+            queue = queue
         )
     }
 }

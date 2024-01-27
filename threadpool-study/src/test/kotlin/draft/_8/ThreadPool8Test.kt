@@ -3,6 +3,7 @@ package draft._8
 import org.junit.jupiter.api.Test
 
 import org.slf4j.LoggerFactory
+import java.util.concurrent.TimeUnit
 import kotlin.time.DurationUnit
 import kotlin.time.toDuration
 
@@ -14,7 +15,10 @@ class ThreadPool8Test {
 
     @Test
     fun execute() {
-        val threadPool8 = ThreadPool8(1, 3, 1.toDuration(DurationUnit.NANOSECONDS))
+        val threadPool8 = ThreadPool8.builder(3)
+            .minNumWorkers(1)
+            .idleTimeout(1, TimeUnit.NANOSECONDS)
+            .build()
         val numTasks = 1000
         try {
             for (i in 0 ..< numTasks) {

@@ -8,7 +8,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 
-// addThreadIfNecessary
+
 // idleTimeout
 // builder
 // submittedHandler
@@ -34,7 +34,10 @@ class ThreadPool8(private val maxNumThreads: Int) : Executor{
     private fun newThread(): Thread {
         numThreads.incrementAndGet()
         numBusyThreads.incrementAndGet()
+
         val thread = Thread {
+            val threadName = Thread.currentThread().name
+            logger.debug("Started a new thread {}", threadName)
             var isBusy = true
             try {
                 try {
@@ -57,6 +60,7 @@ class ThreadPool8(private val maxNumThreads: Int) : Executor{
                             }
 
                             if (task == SHUTDOWN_TASK) {
+                                logger.debug("{} received a command that 'do not work'. {} stops doing work", threadName, threadName)
                                 break
                             } else {
                                 task.run()
@@ -131,20 +135,28 @@ class ThreadPool8(private val maxNumThreads: Int) : Executor{
             }
         }
 
-        val threads: Array<Thread>
-        threadsLock.lock()
-        try {
-            threads = this.threads.toTypedArray()
-        } finally {
-            threadsLock.unlock()
-        }
+        // q: 얘 왜붙였었지
+        while (true) {
+            val threads: Array<Thread>
+            threadsLock.lock()
+            try {
+                threads = this.threads.toTypedArray()
+            } finally {
+                threadsLock.unlock()
+            }
 
-        for (thread in threads) {
-            do {
-                try {
-                    thread.join()
-                } catch (_: InterruptedException) {}
-            } while (thread.isAlive)
+            if (threads.isEmpty()) {
+                break
+            }
+
+            for (thread in threads) {
+                do {
+                    try {
+                        thread.join()
+                    } catch (_: InterruptedException) {}
+                    // q: 얠 붙였던건 interrupt 될수도 있으니까 맞나
+                } while (thread.isAlive)
+            }
         }
     }
 

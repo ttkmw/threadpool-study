@@ -2,7 +2,6 @@ package draft._8
 
 import org.junit.jupiter.api.Test
 
-import org.junit.jupiter.api.Assertions.*
 import org.slf4j.LoggerFactory
 
 class ThreadPool8Test {

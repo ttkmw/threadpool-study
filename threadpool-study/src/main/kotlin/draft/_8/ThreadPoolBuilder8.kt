@@ -12,6 +12,7 @@ class ThreadPoolBuilder8(maxNumWorkers: Int) {
     private var idleTimeoutNanos: Long = 0
     private var queue: BlockingQueue<Runnable>? = null
     private var submissionHandler: TaskSubmissionHandler8 = TaskSubmissionHandler8.ofDefault()
+    private var exceptionHandler: TaskExceptionHandler8 = TaskExceptionHandler8.ofDefault()
 
     init {
         checkArgument(maxNumWorkers > 0, "maxNumWorkers: %s (expected > 0)")
@@ -45,6 +46,11 @@ class ThreadPoolBuilder8(maxNumWorkers: Int) {
         return this
     }
 
+    fun exceptionHandler(exceptionHandler8: TaskExceptionHandler8): ThreadPoolBuilder8 {
+        this.exceptionHandler = exceptionHandler8
+        return this
+    }
+
     fun build(): ThreadPool8 {
         val queue = this.queue ?: LinkedTransferQueue() // q: 이거 왜 LinkedBlockingQueue 썼었지?
         return ThreadPool8(
@@ -52,7 +58,8 @@ class ThreadPoolBuilder8(maxNumWorkers: Int) {
             maxNumWorkers = maxNumWorkers,
             idleTimeoutNanos = idleTimeoutNanos,
             queue = queue,
-            submissionHandler = submissionHandler
+            submissionHandler = submissionHandler,
+            exceptionHandler = exceptionHandler
         )
     }
 }

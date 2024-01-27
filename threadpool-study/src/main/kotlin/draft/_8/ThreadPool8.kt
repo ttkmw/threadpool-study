@@ -4,13 +4,11 @@ import TaskAction
 import org.slf4j.LoggerFactory
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.Executor
-import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 
-// exceptionHandler
 // shutdownNow
 // watchdog
 // executorService
@@ -19,7 +17,8 @@ class ThreadPool8(
     private val maxNumWorkers: Int,
     private val idleTimeoutNanos: Long,
     private val queue: BlockingQueue<Runnable>,
-    private val submissionHandler: TaskSubmissionHandler8
+    private val submissionHandler: TaskSubmissionHandler8,
+    private val exceptionHandler: TaskExceptionHandler8
 ) : Executor {
     val workers = HashSet<Worker>()
 
@@ -167,8 +166,9 @@ class ThreadPool8(
             var lastTimeoutNanos = System.nanoTime()
             try {
                 while (true) {
+                    var task: Runnable? = null
                     try {
-                        var task = queue.poll()
+                        task = queue.poll()
                         if (task == null) {
                             if (isBusy) {
                                 isBusy = false
@@ -224,9 +224,21 @@ class ThreadPool8(
                             lastTimeoutNanos = System.nanoTime()
                         }
                     } catch (t: Throwable) {
-                        if (t !is InterruptedException) {
-                            logger.debug("unexpected exception occurred", t)
+                        if (task != null) {
+                            if (t !is InterruptedException) {
+                                try {
+                                    exceptionHandler.handleException(task, t, this@ThreadPool8)
+                                } catch (t2: Throwable) {
+                                    t2.addSuppressed(t)
+                                    logger.warn("unexpected error occurred from task exception handler: ", t2)
+                                }
+
+                            }
+                        } else {
+                            logger.warn("unexpected error occurred: ",t)
                         }
+
+
                     }
                 }
             } finally {

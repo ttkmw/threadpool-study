@@ -4,19 +4,20 @@ import org.slf4j.LoggerFactory
 import java.util.concurrent.Executor
 import java.util.concurrent.LinkedTransferQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
+import kotlin.time.Duration
 
 
-// idleTimeout
 // builder
 // submittedHandler
 // exceptionHandler
 // shutdownNow
 // watchdog
 // executorService
-class ThreadPool8(private val maxNumThreads: Int) : Executor{
+class ThreadPool8(private val maxNumThreads: Int, idleTimeout: Duration) : Executor{
     val threads = HashSet<Thread>()
     val queue = LinkedTransferQueue<Runnable>()
 
@@ -25,6 +26,8 @@ class ThreadPool8(private val maxNumThreads: Int) : Executor{
 
     private val threadsLock = ReentrantLock()
     private val shutdown = AtomicBoolean()
+
+    private val idleTimeoutNanos = idleTimeout.inWholeNanoseconds
 
     companion object {
         private val logger = LoggerFactory.getLogger(ThreadPool8::class.java)
@@ -39,6 +42,7 @@ class ThreadPool8(private val maxNumThreads: Int) : Executor{
             val threadName = Thread.currentThread().name
             logger.debug("Started a new thread {}", threadName)
             var isBusy = true
+            var lastTimeoutNanos = System.nanoTime()
             try {
                 try {
                     while (true) {
@@ -49,7 +53,16 @@ class ThreadPool8(private val maxNumThreads: Int) : Executor{
                                     isBusy = false
                                     numBusyThreads.decrementAndGet()
                                 }
-                                task = queue.take()
+                                val waitTimeNanos = idleTimeoutNanos - (System.nanoTime() - lastTimeoutNanos)
+                                if (waitTimeNanos < 0) {
+                                    logger.debug("{} stops doing work because {} haven't work too long time", threadName, threadName)
+                                    break
+                                }
+                                task = queue.poll(waitTimeNanos, TimeUnit.NANOSECONDS)
+                                if (task == null) {
+                                    logger.debug("{} stops doing work because there is no work for some time", threadName)
+                                    break
+                                }
                                 isBusy = true
                                 numBusyThreads.incrementAndGet()
                             } else {
@@ -64,6 +77,7 @@ class ThreadPool8(private val maxNumThreads: Int) : Executor{
                                 break
                             } else {
                                 task.run()
+                                lastTimeoutNanos = System.nanoTime()
                             }
                         } catch (t: Throwable) {
                             if (t !is InterruptedException) {
@@ -75,14 +89,20 @@ class ThreadPool8(private val maxNumThreads: Int) : Executor{
                     threadsLock.lock()
                     try {
                         threads.remove(Thread.currentThread())
+                        // q: lock 안에 있어야 하는 경우는 언제이지? idleTimeout 할 때 decrement 하는걸 락 안에 둬야하는 경우도 설명했었음.
+                        numThreads.decrementAndGet()
+                        if (isBusy) {
+                            numBusyThreads.decrementAndGet()
+                        }
+                        if (threads.isEmpty() && queue.isNotEmpty()) {
+                            if (queue.any { it != SHUTDOWN_TASK }) {
+                                addThreadIfNecessary()
+                            }
+                        }
                     } finally {
                         threadsLock.unlock()
                     }
-                    // q: lock 안에 있어야 하는 경우는 언제이지? idleTimeout 할 때 decrement 하는걸 락 안에 둬야하는 경우도 설명했었음.
-                    numThreads.decrementAndGet()
-                    if (isBusy) {
-                        numBusyThreads.decrementAndGet()
-                    }
+
                 }
             } finally {
                 logger.debug("${Thread.currentThread().name} is terminated")

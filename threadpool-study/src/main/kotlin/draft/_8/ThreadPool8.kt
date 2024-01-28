@@ -5,8 +5,8 @@ import org.slf4j.LoggerFactory
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
 // shutdownNow
@@ -26,7 +26,7 @@ class ThreadPool8(
     private val numBusyWorkers = AtomicInteger()
 
     private val workersLock = ReentrantLock()
-    private val shutdown = AtomicBoolean()
+    private val shutdownState = AtomicReference(ShutdownState.NOT_SHUTDOWN)
 
     companion object {
         private val logger = LoggerFactory.getLogger(ThreadPool8::class.java)
@@ -64,7 +64,7 @@ class ThreadPool8(
 
         addWorkersIfNecessary()
 
-        if (shutdown.get()) {
+        if (isShutdown()) {
             queue.remove(task)
             val accepted = handleLateSubmission(task)
             assert(!accepted)
@@ -82,7 +82,7 @@ class ThreadPool8(
     }
 
     private fun handleLateSubmission(task: Runnable): Boolean {
-        if (!shutdown.get()) {
+        if (!isShutdown()) {
             return true
         }
         val taskAction = submissionHandler.handleLateSubmission(task, this)
@@ -96,7 +96,7 @@ class ThreadPool8(
             workersLock.lock()
             var newWorkers: MutableList<Worker>? = null
             try {
-                while (!shutdown.get()) {
+                while (!isShutdown()) {
                     val workerType = needsMoreWorkers() ?: break
                     if (newWorkers == null) {
                         newWorkers = ArrayList()
@@ -125,8 +125,48 @@ class ThreadPool8(
     }
 
     fun shutdown() {
+        doShutdown(false)
+    }
+
+    fun shutdownNow(): List<Runnable> {
+        doShutdown(true)
+        val unprocessedTasks = ArrayList<Runnable>()
+        while (true) {
+            val task = queue.poll() ?: break
+            if (task != SHUTDOWN_TASK) {
+                unprocessedTasks.add(task)
+            }
+        }
+        if (queue.isNotEmpty()) {
+            for (task in queue.toTypedArray()) {
+                if (task != SHUTDOWN_TASK && !unprocessedTasks.contains(task)) {
+                    unprocessedTasks.add(task)
+                }
+            }
+        }
+        return unprocessedTasks
+    }
+
+    private fun isShutdown(): Boolean {
+        return shutdownState.get() != ShutdownState.NOT_SHUTDOWN
+    }
+
+    private fun doShutdown(interrupt: Boolean) {
         logger.debug("shutdown thread pool is started")
-        if (shutdown.compareAndSet(false, true)) {
+        var needsShutdownTasks = false
+        if (interrupt) {
+            if (shutdownState.compareAndSet(ShutdownState.NOT_SHUTDOWN, ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT)) {
+                needsShutdownTasks = true
+            } else {
+                shutdownState.compareAndSet(ShutdownState.SHUTTING_DOWN_WITHOUT_INTERRUPT, ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT)
+            }
+        } else {
+            if (shutdownState.compareAndSet(ShutdownState.NOT_SHUTDOWN, ShutdownState.SHUTTING_DOWN_WITHOUT_INTERRUPT)) {
+                needsShutdownTasks = true
+            }
+        }
+
+        if (needsShutdownTasks) {
             for (i in 0..<maxNumWorkers) {
                 queue.add(SHUTDOWN_TASK)
             }
@@ -144,6 +184,12 @@ class ThreadPool8(
 
             if (workers.isEmpty()) {
                 break
+            }
+
+            if (interrupt) {
+                for (w in workers) {
+                    w.interrupt()
+                }
             }
 
             for (w in workers) {
@@ -223,22 +269,22 @@ class ThreadPool8(
                             task.run()
                             lastTimeoutNanos = System.nanoTime()
                         }
+                    } catch (cause: InterruptedException) {
+                        if (shutdownState.get() == ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT) {
+                            logger.debug("${Thread.currentThread().name} is shutting down because it received command that stop work immediately")
+                            break
+                        }
                     } catch (t: Throwable) {
                         if (task != null) {
-                            if (t !is InterruptedException) {
-                                try {
-                                    exceptionHandler.handleException(task, t, this@ThreadPool8)
-                                } catch (t2: Throwable) {
-                                    t2.addSuppressed(t)
-                                    logger.warn("unexpected error occurred from task exception handler: ", t2)
-                                }
-
+                            try {
+                                exceptionHandler.handleException(task, t, this@ThreadPool8)
+                            } catch (t2: Throwable) {
+                                t2.addSuppressed(t)
+                                logger.warn("unexpected error occurred from task exception handler: ", t2)
                             }
                         } else {
                             logger.warn("unexpected error occurred: ",t)
                         }
-
-
                     }
                 }
             } finally {
@@ -258,6 +304,7 @@ class ThreadPool8(
                 } finally {
                     workersLock.unlock()
                 }
+                shutdownState.set(ShutdownState.TERMINATED)
                 logger.debug("{} ({}) is terminated", Thread.currentThread().name, expirationMode)
             }
         }
@@ -271,10 +318,21 @@ class ThreadPool8(
                 // q: 얠 붙였던건 interrupt 될수도 있으니까 맞나
             } while (thread.isAlive)
         }
+
+        fun interrupt() {
+            thread.interrupt()
+        }
     }
 
     enum class ExpirationMode {
         NEVER,
         ON_IDLE_TIMOUT
+    }
+
+    enum class ShutdownState {
+        NOT_SHUTDOWN,
+        SHUTTING_DOWN_WITHOUT_INTERRUPT,
+        SHUTTING_DOWN_WITH_INTERRUPT,
+        TERMINATED
     }
 }

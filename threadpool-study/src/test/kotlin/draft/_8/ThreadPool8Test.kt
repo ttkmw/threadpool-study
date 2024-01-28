@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test
 
 import org.slf4j.LoggerFactory
 import java.util.concurrent.Callable
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import kotlin.time.DurationUnit
 import kotlin.time.toDuration
@@ -12,6 +13,35 @@ class ThreadPool8Test {
 
     companion object {
         private val logger = LoggerFactory.getLogger(ThreadPool8Test::class.java)
+    }
+
+    @Test
+    fun shutdownNow() {
+        val threadPool8 = ThreadPool8.builder(6)
+            .minNumWorkers(3)
+            .idleTimeout(1, TimeUnit.NANOSECONDS)
+            .build()
+
+        val numTasks = 100
+        try {
+            for (i in 0 ..< numTasks) {
+                threadPool8.execute {
+                    println("${Thread.currentThread().name} is running task - $i")
+                    Thread.sleep(10000)
+                }
+            }
+            Thread.sleep(2000)
+            val result = CompletableFuture.runAsync { threadPool8.shutdown() }
+            Thread.sleep(1000)
+            println("isDone ${result.isDone}")
+            val unprocessed = threadPool8.shutdownNow()
+            println("size ${unprocessed.size}")
+            println("waiting for shutdown")
+            result.get()
+            println("shutdown complete")
+        } finally {
+            threadPool8.shutdown()
+        }
     }
 
     @Test

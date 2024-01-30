@@ -16,7 +16,7 @@ class Watchdog(
     }
 
     override fun work() {
-        logger.debug("Started a watchdong {}", threadName())
+        logger.debug("Started a watchdog {}", threadName())
         try {
             while (!threadPool.isShutdown()) {
                 try {

@@ -6,8 +6,6 @@ import org.slf4j.LoggerFactory
 import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
-import kotlin.time.DurationUnit
-import kotlin.time.toDuration
 
 class ThreadPool8Test {
 
@@ -20,9 +18,11 @@ class ThreadPool8Test {
         val threadPool8 = ThreadPool8.builder(6)
             .minNumWorkers(3)
             .idleTimeout(1, TimeUnit.NANOSECONDS)
+            .taskTimeout(1000, TimeUnit.MILLISECONDS)
+            .watchdogIterationDuration(1, TimeUnit.SECONDS)
             .build()
 
-        val numTasks = 100
+        val numTasks = 50
         try {
             for (i in 0 ..< numTasks) {
                 threadPool8.execute {
@@ -34,8 +34,8 @@ class ThreadPool8Test {
             val result = CompletableFuture.runAsync { threadPool8.shutdown() }
             Thread.sleep(1000)
             println("isDone ${result.isDone}")
-            val unprocessed = threadPool8.shutdownNow()
-            println("size ${unprocessed.size}")
+//            val unprocessed = threadPool8.shutdownNow()
+//            println("size ${unprocessed.size}")
             println("waiting for shutdown")
             result.get()
             println("shutdown complete")

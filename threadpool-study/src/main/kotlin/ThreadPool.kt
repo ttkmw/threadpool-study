@@ -27,8 +27,6 @@ class ThreadPool(
     private val exceptionHandler: TaskExceptionHandler,
 ) : Executor {
 
-
-
     companion object {
         private val SHUTDOWN_TASK = Runnable { }
 
@@ -200,7 +198,7 @@ class ThreadPool(
                 logger.debug("shutdownNow() is called while shutdown() is in progress")
             }
         } else {
-            if (shutdownState.compareAndSet(ShutdownState.NOT_SHUTDOWN, ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT)) {
+            if (shutdownState.compareAndSet(ShutdownState.NOT_SHUTDOWN, ShutdownState.SHUTTING_DOWN_WITHOUT_INTERRUPT)) {
                 needsShutdownTasks = true
             }
         }
@@ -308,7 +306,7 @@ class ThreadPool(
                         }
 
                         if (task == SHUTDOWN_TASK) {
-                            logger.debug("Terminating worker with a posion pill {}", threadName())
+                            logger.debug("Terminating worker with a poison pill {}", threadName())
                             break
                         } else {
                             try {

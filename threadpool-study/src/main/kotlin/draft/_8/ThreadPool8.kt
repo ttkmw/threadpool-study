@@ -1,13 +1,16 @@
 package draft._8
 
 import TaskAction
+import com.google.common.base.Preconditions.checkState
 import org.slf4j.LoggerFactory
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
+import kotlin.math.log
 
 // shutdownNow
 // watchdog
@@ -16,6 +19,9 @@ class ThreadPool8(
     private val minNumWorkers: Int,
     private val maxNumWorkers: Int,
     private val idleTimeoutNanos: Long,
+    private val taskTimeoutNanos: Long,
+    private val watchdogIterationDurationMillis: Long,
+    private val watchdogIterationDurationNanos: Int,
     private val queue: BlockingQueue<Runnable>,
     private val submissionHandler: TaskSubmissionHandler8,
     private val exceptionHandler: TaskExceptionHandler8
@@ -26,11 +32,16 @@ class ThreadPool8(
     private val numBusyWorkers = AtomicInteger()
 
     private val workersLock = ReentrantLock()
+
     private val shutdownState = AtomicReference(ShutdownState.NOT_SHUTDOWN)
+    private val started = AtomicBoolean()
+
+    private val watchdog: Watchdog? = if (taskTimeoutNanos == (0).toLong()) null else Watchdog()
 
     companion object {
         private val logger = LoggerFactory.getLogger(ThreadPool8::class.java)
         private val SHUTDOWN_TASK = Runnable { }
+        private val TASK_NOT_STARTED_NANOS = (0).toLong()
 
         fun of(maxNumWorkers: Int): ThreadPool8 {
             return builder(maxNumWorkers).build()
@@ -86,7 +97,7 @@ class ThreadPool8(
             return true
         }
         val taskAction = submissionHandler.handleLateSubmission(task, this)
-        assert(taskAction != TaskAction.accept()) { "task Action cannot be accept" }
+        checkState(taskAction != TaskAction.accept(), "task Action must not be Accept")
         taskAction.doAction(task)
         return false
     }
@@ -97,16 +108,23 @@ class ThreadPool8(
             var newWorkers: MutableList<Worker>? = null
             try {
                 while (!isShutdown()) {
-                    val workerType = needsMoreWorkers() ?: break
+                    val expirationMode = needsMoreWorkers() ?: break
                     if (newWorkers == null) {
                         newWorkers = ArrayList()
                     }
-                    newWorkers.add(newWorker(workerType))
+                    newWorkers.add(newWorker(expirationMode))
                 }
             } finally {
                 workersLock.unlock()
             }
-            newWorkers?.forEach { it.start() }
+
+            if (newWorkers != null) {
+                // q8: 왜 여기서 start하는지 모름
+                watchdog?.start()
+                newWorkers.forEach { it.start() }
+            }
+
+
         }
     }
 
@@ -159,6 +177,7 @@ class ThreadPool8(
                 needsShutdownTasks = true
             } else {
                 shutdownState.compareAndSet(ShutdownState.SHUTTING_DOWN_WITHOUT_INTERRUPT, ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT)
+                logger.debug("shutdownNow() is called while shutdown is in progress")
             }
         } else {
             if (shutdownState.compareAndSet(ShutdownState.NOT_SHUTDOWN, ShutdownState.SHUTTING_DOWN_WITHOUT_INTERRUPT)) {
@@ -172,7 +191,7 @@ class ThreadPool8(
             }
         }
 
-        // q: 얘 왜붙였었지
+        // q8: 얘 왜붙였었지
         while (true) {
             val workers: Array<Worker>
             workersLock.lock()
@@ -186,26 +205,104 @@ class ThreadPool8(
                 break
             }
 
+            // q8: 이거 호출되는거때매 다 끝나지도 않았는데 watchdog이 꺼져서 shutdown을 계속 기다리게됨. 그래도 되나?
+            watchdog?.interrupt(InterruptedReason.SHUTDOWN)
             if (interrupt) {
                 for (w in workers) {
-                    w.interrupt()
+                    w.interrupt(InterruptedReason.SHUTDOWN)
                 }
             }
 
+            watchdog?.join()
             for (w in workers) {
                 w.join()
             }
         }
+        shutdownState.set(ShutdownState.TERMINATED)
     }
 
-    inner class Worker(private val expirationMode: ExpirationMode) {
-        private val thread = Thread(this::work)
-
+    abstract inner class AbstractWorker {
+        private val thread = Thread(::work)
+        private val started = AtomicBoolean()
+        @Volatile
+        private var interruptedReason: InterruptedReason? = null
         fun start() {
-            thread.start()
+            if (started.compareAndSet(false, true)) {
+                thread.start()
+            }
+        }
+        fun join() {
+            do {
+                try {
+                    thread.join()
+                } catch (_: InterruptedException) {
+                }
+                // q8: 얠 붙였던건 interrupt 될수도 있으니까 맞나
+            } while (thread.isAlive)
         }
 
-        private fun work() {
+        fun interrupted(): InterruptedReason? {
+            val interrupted = Thread.interrupted()
+            val interruptedReason = this.interruptedReason
+            this.interruptedReason = null
+            if (interrupted) {
+                return interruptedReason
+            }
+            return null
+        }
+
+        fun interrupt(interruptedReason: InterruptedReason) {
+            this.interruptedReason = interruptedReason
+            thread.interrupt()
+        }
+        abstract fun work()
+        fun clearInterrupt() {
+            interruptedReason = null
+            Thread.interrupted()
+        }
+    }
+
+    enum class InterruptedReason {
+        SHUTDOWN,
+        WATCHDOG
+    }
+
+    inner class Watchdog: AbstractWorker() {
+        override fun work() {
+            logger.debug("Started a watchdog {}", Thread.currentThread().name)
+            try {
+                while (!isShutdown()) {
+                    try {
+                        Thread.sleep(watchdogIterationDurationMillis, watchdogIterationDurationNanos)
+                    } catch (_: InterruptedException) {
+                        continue
+                    }
+                    for (w in workers) {
+                        val taskStartTimeNanos = w.taskStartTimeNanos()
+                        // q8: 이거 왜하는지 모름
+                        if (taskStartTimeNanos == TASK_NOT_STARTED_NANOS) {
+                            break
+                        }
+                        val runningTime = System.nanoTime() - taskStartTimeNanos
+                        if (taskTimeoutNanos < runningTime) {
+                            w.interrupt(InterruptedReason.WATCHDOG)
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                logger.warn("Unexpected exception", t)
+            } finally {
+                logger.debug("A watchdog has been terminated {}", Thread.currentThread().name)
+            }
+        }
+
+    }
+
+    inner class Worker(private val expirationMode: ExpirationMode): AbstractWorker() {
+        @Volatile
+        private var taskStartTimeNanos = TASK_NOT_STARTED_NANOS
+
+        override fun work() {
             val threadName = Thread.currentThread().name
             logger.debug("Started a new thread {} ({})", threadName, expirationMode)
             var isBusy = true
@@ -214,21 +311,25 @@ class ThreadPool8(
                 while (true) {
                     var task: Runnable? = null
                     try {
+                        // q8: 이거 왜하는지 모름
+                        clearInterrupt()
+                        if (shutdownState.get() == ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT) {
+                            logger.debug("Terminating a worker by an interrupt {}", threadName)
+                            break
+                        }
                         task = queue.poll()
                         if (task == null) {
                             if (isBusy) {
                                 isBusy = false
                                 numBusyWorkers.decrementAndGet()
                             }
-                            val waitTimeNanos = idleTimeoutNanos - (System.nanoTime() - lastTimeoutNanos)
                             when (expirationMode) {
                                 ExpirationMode.NEVER -> {
                                     task = queue.take()
-                                    isBusy = true
-                                    numBusyWorkers.incrementAndGet()
                                 }
 
                                 ExpirationMode.ON_IDLE_TIMOUT -> {
+                                    val waitTimeNanos = idleTimeoutNanos - (System.nanoTime() - lastTimeoutNanos)
                                     if (waitTimeNanos < 0) {
                                         logger.debug(
                                             "{} stops doing work because {} haven't work too long time",
@@ -245,11 +346,10 @@ class ThreadPool8(
                                         )
                                         break
                                     }
-                                    isBusy = true
-                                    numBusyWorkers.incrementAndGet()
                                 }
-
                             }
+                            isBusy = true
+                            numBusyWorkers.incrementAndGet()
 
                         } else {
                             if (!isBusy) {
@@ -266,13 +366,24 @@ class ThreadPool8(
                             )
                             break
                         } else {
-                            task.run()
-                            lastTimeoutNanos = System.nanoTime()
+
+                            try {
+                                setTaskStartTimeNanos()
+                                task.run()
+                            } finally {
+                                clearTaskStartTimeNanos()
+                                lastTimeoutNanos = System.nanoTime()
+
+                            }
                         }
                     } catch (cause: InterruptedException) {
                         if (shutdownState.get() == ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT) {
                             logger.debug("${Thread.currentThread().name} is shutting down because it received command that stop work immediately")
                             break
+                        } else if (logger.isTraceEnabled) {
+                            logger.trace("Ignoring an interrupt except command that stop work immediately", cause)
+                        } else {
+                            logger.debug("Ignoring an interrupt except command that stop work immediately")
                         }
                     } catch (t: Throwable) {
                         if (task != null) {
@@ -293,10 +404,11 @@ class ThreadPool8(
                     workers.remove(this)
                     // q: lock 안에 있어야 하는 경우는 언제이지? idleTimeout 할 때 decrement 하는걸 락 안에 둬야하는 경우도 설명했었음.
                     numWorkers.decrementAndGet()
+                    // q: isBusy 둬야할 것 같은데 왜 빠졌을까?
                     if (isBusy) {
                         numBusyWorkers.decrementAndGet()
                     }
-                    if (workers.isEmpty() && queue.isNotEmpty()) {
+                    if (workers.isEmpty() && queue.isNotEmpty() && shutdownState.get() != ShutdownState.SHUTTING_DOWN_WITH_INTERRUPT) {
                         if (queue.any { it != SHUTDOWN_TASK }) {
                             addWorkersIfNecessary()
                         }
@@ -304,25 +416,28 @@ class ThreadPool8(
                 } finally {
                     workersLock.unlock()
                 }
-                shutdownState.set(ShutdownState.TERMINATED)
                 logger.debug("{} ({}) is terminated", Thread.currentThread().name, expirationMode)
             }
         }
 
-        fun join() {
-            do {
-                try {
-                    thread.join()
-                } catch (_: InterruptedException) {
-                }
-                // q: 얠 붙였던건 interrupt 될수도 있으니까 맞나
-            } while (thread.isAlive)
+        private fun clearTaskStartTimeNanos() {
+            taskStartTimeNanos = TASK_NOT_STARTED_NANOS
         }
 
-        fun interrupt() {
-            thread.interrupt()
+        private fun setTaskStartTimeNanos() {
+            val nanoTime = System.nanoTime()
+            taskStartTimeNanos = if (nanoTime == TASK_NOT_STARTED_NANOS) 1 else nanoTime
+            val interruptedReason = interrupted()
+            if (interruptedReason == InterruptedReason.SHUTDOWN) {
+                interrupt(InterruptedReason.SHUTDOWN)
+            } else{
+                assert(interruptedReason == null || interruptedReason == InterruptedReason.WATCHDOG)
+            }
         }
+
+        fun taskStartTimeNanos() = taskStartTimeNanos
     }
+
 
     enum class ExpirationMode {
         NEVER,

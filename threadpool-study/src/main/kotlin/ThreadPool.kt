@@ -94,7 +94,6 @@ class ThreadPool(
         if (needsMoreWorker() != null) {
             workersLock.lock()
             var newWorkers: MutableList<Worker>? = null
-            // try, finally를 newThread에만 걸어도 되는건지, needsMoreThreads까지 포함해야하는건지 궁금.
             try {
 
                 while (!isShutdown()) {

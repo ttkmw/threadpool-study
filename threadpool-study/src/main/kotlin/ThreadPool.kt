@@ -8,14 +8,6 @@ import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import java.util.function.Consumer
 
-/*
-* 문제점
-* 태스크를 실행할 때 스레드가 있다고 판단해서 스레드를 추가하지 않았다
-* 태스크a를 큐에 넣었다
-* 스레드를 종료했다.
-* 태스크a가 실행되지 않는다. - 문제
-*
-* */
 class ThreadPool(
     private val minNumWorkers: Int,
     private val maxNumWorkers: Int,

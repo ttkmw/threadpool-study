@@ -4,8 +4,7 @@ import java.util.concurrent.Callable
 import java.util.concurrent.CompletableFuture
 
 import java.util.concurrent.CountDownLatch
-import kotlin.time.DurationUnit
-import kotlin.time.toDuration
+import java.util.concurrent.TimeUnit
 
 class ThreadPoolTest {
     companion object {
@@ -63,6 +62,7 @@ class ThreadPoolTest {
                             println("${Thread.currentThread().name} is running - $this")
                             Thread.sleep(10000)
                         } catch (t: InterruptedException) {
+                            println("currentThread: ${Thread.currentThread().name}")
                             Thread.currentThread().interrupt()
                         } finally {
                             latch.countDown()
@@ -91,6 +91,42 @@ class ThreadPoolTest {
             logger.info("Shutdown complete")
 
         } finally {
+            threadPool.shutdown()
+        }
+    }
+
+    @Test
+    fun watchdog() {
+        val threadPool = ThreadPool.builder(6)
+            .minNumWorkers(3)
+            .taskTimeout(1, TimeUnit.SECONDS)
+            .watchdogInterval(1, TimeUnit.SECONDS)
+            .build()
+
+        val numTasks = 100
+        try {
+            for (i in 0..<numTasks) {
+                val myRunnable = object : Runnable {
+                    override fun run() {
+                        try {
+                            println("${Thread.currentThread().name} is running - $this")
+                            Thread.sleep(10000)
+                        } catch (t: InterruptedException) {
+                            logger.debug("interrupted: ${Thread.currentThread().name}")
+                            Thread.currentThread().interrupt()
+                        } finally {
+                        }
+                    }
+
+                    override fun toString(): String {
+                        return "Task $i"
+                    }
+                }
+                threadPool.execute(myRunnable)
+            }
+
+        } finally {
+            println("shutdown")
             threadPool.shutdown()
         }
     }
